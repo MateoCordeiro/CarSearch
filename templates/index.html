@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Car Search Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --card: #222536;
+    --border: #2e3249; --accent: #4f8ef7; --accent2: #7c5cbf;
+    --green: #3ecf8e; --yellow: #f6c90e; --red: #ef4444;
+    --text: #e2e8f0; --muted: #8892a4;
+    --radius: 10px; --shadow: 0 4px 20px rgba(0,0,0,0.4);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+
+  /* Layout */
+  .layout { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  .sidebar { background: var(--surface); border-right: 1px solid var(--border); padding: 20px; display: flex; flex-direction: column; gap: 20px; }
+  .main { padding: 24px; overflow-y: auto; }
+
+  /* Header */
+  .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+  .header h1 { font-size: 1.4rem; font-weight: 700; }
+  .header h1 span { color: var(--accent); }
+
+  /* Stats bar */
+  .stats-bar { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px; flex: 1; min-width: 120px; }
+  .stat-card .num { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
+  .stat-card .label { font-size: 0.75rem; color: var(--muted); margin-top: 2px; text-transform: uppercase; letter-spacing: .05em; }
+
+  /* Sidebar sections */
+  .sidebar-section h3 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin-bottom: 10px; }
+  .form-row { margin-bottom: 10px; }
+  .form-row label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 4px; }
+  .form-row input, .form-row select { width: 100%; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px 10px; font-size: 0.85rem; }
+  .form-row input:focus, .form-row select:focus { outline: none; border-color: var(--accent); }
+  .inline-row { display: flex; gap: 8px; }
+  .inline-row .form-row { flex: 1; }
+
+  /* Source toggles */
+  .source-toggles { display: flex; flex-direction: column; gap: 6px; }
+  .source-toggle { display: flex; align-items: center; justify-content: space-between; background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-size: 0.85rem; cursor: pointer; transition: border-color .15s; }
+  .source-toggle:hover { border-color: var(--accent); }
+  .source-toggle.active { border-color: var(--green); }
+  .source-toggle .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+  .source-toggle.active .dot { background: var(--green); }
+
+  /* Buttons */
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 16px; border-radius: 7px; border: none; cursor: pointer; font-size: 0.85rem; font-weight: 600; transition: opacity .15s, transform .1s; }
+  .btn:hover { opacity: .88; transform: translateY(-1px); }
+  .btn:active { transform: translateY(0); }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-success { background: var(--green); color: #000; }
+  .btn-violet  { background: var(--accent2); color: #fff; }
+  .btn-ghost   { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+  .btn-sm { padding: 6px 12px; font-size: 0.78rem; }
+  .btn-block { width: 100%; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* Progress bar */
+  .progress-wrap { display: none; margin: 4px 0 16px; }
+  .progress-wrap.show { display: block; }
+  .progress-bar { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--accent); transition: width .3s; }
+  .progress-label { font-size: 0.78rem; color: var(--muted); margin-top: 5px; }
+
+  /* Panels & operation cards */
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; margin-bottom: 20px; }
+  .panel h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 14px; }
+  .op-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-bottom: 6px; }
+  .op-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .op-card h4 { font-size: .95rem; }
+  .op-card p { font-size: .76rem; color: var(--muted); line-height: 1.45; flex: 1; }
+
+  /* Listings grid */
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .toolbar select { background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 7px 10px; font-size: 0.85rem; }
+  .toggle-label { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; cursor: pointer; }
+  .toggle-label input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; }
+
+  .listings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+  .car-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; transition: border-color .15s, transform .15s; }
+  .car-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .car-card.is-duplicate { opacity: .6; border-style: dashed; }
+
+  .car-img { width: 100%; height: 175px; object-fit: cover; background: var(--surface); }
+  .car-img-placeholder { width: 100%; height: 175px; background: var(--surface); display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 2rem; }
+
+  .car-body { padding: 14px; }
+  .car-title { font-size: 0.95rem; font-weight: 700; margin-bottom: 4px; }
+  .car-price { font-size: 1.3rem; font-weight: 800; color: var(--green); }
+  .car-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .badge { font-size: 0.72rem; padding: 3px 8px; border-radius: 20px; font-weight: 600; }
+  .badge-source { background: rgba(79,142,247,.15); color: var(--accent); border: 1px solid rgba(79,142,247,.3); }
+  .badge-dup { background: rgba(246,201,14,.15); color: var(--yellow); border: 1px solid rgba(246,201,14,.3); }
+  .badge-mileage { background: rgba(62,207,142,.1); color: var(--green); border: 1px solid rgba(62,207,142,.2); }
+  .badge-dist { background: rgba(255,255,255,.05); color: var(--muted); border: 1px solid var(--border); }
+
+  /* Expandable "listed on N sites" panel */
+  .sites-panel { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 6px; }
+  .site-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+              font-size: 0.78rem; padding: 3px 0; }
+  .site-row a { color: var(--accent); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .site-row a:hover { text-decoration: underline; }
+  .site-price { color: var(--muted); white-space: nowrap; }
+  .site-best { color: var(--green); font-weight: 600; margin-left: 4px; }
+  .sites-loading { font-size: 0.75rem; color: var(--muted); padding: 4px 0; }
+
+  .car-footer { padding: 10px 14px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
+
+  /* Grouped same-model card (collapsible) — looks like a stack of cards */
+  .group-card { position: relative; box-shadow: 5px 5px 0 -1px var(--surface), 5px 5px 0 0 var(--border), 10px 10px 0 -1px var(--surface), 10px 10px 0 0 var(--border); }
+  .group-count-badge { position: absolute; top: 10px; right: 10px; background: var(--accent); color: #fff; font-weight: 800; font-size: 0.78rem; padding: 4px 11px; border-radius: 20px; box-shadow: 0 2px 8px rgba(0,0,0,.35); z-index: 2; }
+  .price-range { font-size: 1.15rem; font-weight: 800; color: var(--green); }
+  .group-toggle { width: 100%; background: transparent; border: none; border-top: 1px solid var(--border); color: var(--accent); font-weight: 700; font-size: 0.85rem; padding: 11px 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; }
+  .group-toggle:hover { background: rgba(79,142,247,.08); }
+  .group-toggle .chev { transition: transform .15s; }
+  .group-toggle.open .chev { transform: rotate(180deg); }
+  .group-expand { display: none; grid-column: 1 / -1; margin: 2px 0 10px; padding: 16px; background: rgba(255,255,255,.02); border: 1px dashed var(--border); border-radius: var(--radius); }
+  .group-expand.open { display: block; }
+  .group-expand-head { font-size: 0.82rem; color: var(--muted); font-weight: 600; margin-bottom: 12px; }
+
+  /* Empty / loading states */
+  .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .empty .icon { font-size: 3rem; margin-bottom: 12px; }
+  .spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Tabs (two grouped clusters with a divider between them) */
+  .tabs { display: flex; align-items: stretch; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .tab { padding: 9px 16px; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 0.88rem; font-weight: 600; color: var(--muted); transition: all .15s; border-bottom: 2px solid transparent; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-group { display: flex; align-items: center; gap: 4px; }
+  .tab-group-label { font-size: .6rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); align-self: center; padding: 0 8px 0 4px; opacity: .65; }
+  .tab-sep { width: 1px; background: var(--border); margin: 6px 12px; align-self: stretch; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* Dealer table */
+  .dealer-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  .dealer-table th { text-align: left; padding: 10px 12px; color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--border); }
+  .dealer-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .dealer-table tr:hover td { background: rgba(255,255,255,.02); }
+
+  @media (max-width: 768px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar { border-right: none; border-bottom: 1px solid var(--border); }
+  }
+</style>
+</head>
+<body>
+
+<div class="layout">
+  <!-- ── Sidebar: global settings only ──────────────────────── -->
+  <aside class="sidebar">
+    <div>
+      <h2 style="font-size:1.1rem;font-weight:800;">🚗 CarSearch</h2>
+      <p style="font-size:.75rem;color:var(--muted);margin-top:3px;">Find the best deal, automatically.</p>
+    </div>
+
+    <div class="sidebar-section">
+      <h3>Location</h3>
+      <div class="inline-row">
+        <div class="form-row"><label>ZIP Code</label><input id="cfg-zip" type="text" placeholder="78664"></div>
+        <div class="form-row"><label>Radius (mi)</label><input id="cfg-radius" type="number" placeholder="50"></div>
+      </div>
+      <p style="font-size:.7rem;color:var(--muted);">Used for the search radius and all dealer operations.</p>
+    </div>
+
+    <button class="btn btn-ghost btn-block btn-sm" onclick="saveConfig()">💾 Save Settings</button>
+
+    <div style="font-size:.72rem;color:var(--muted);margin-top:auto;line-height:1.6;">
+      <div><b style="color:var(--text)">Find your car</b> tabs only read what's stored.</div>
+      <div style="margin-top:4px;"><b style="color:var(--text)">Build the database</b> tabs go out and scrape.</div>
+    </div>
+  </aside>
+
+  <!-- ── Main ───────────────────────────────────────────────── -->
+  <main class="main">
+    <div class="header">
+      <h1>Car <span>Search</span></h1>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <div id="loading-spinner" style="display:none;"><div class="spinner"></div></div>
+        <button class="btn btn-ghost btn-sm" onclick="refreshCurrent()">↻ Refresh</button>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-bar">
+      <div class="stat-card"><div class="num" id="stat-total">—</div><div class="label">Total Listings</div></div>
+      <div class="stat-card"><div class="num" id="stat-dupes" style="color:var(--yellow)">—</div><div class="label">Cross-Listed</div></div>
+      <div class="stat-card"><div class="num" id="stat-dealers" style="color:var(--accent2)">—</div><div class="label">Dealerships</div></div>
+      <div class="stat-card"><div class="num" id="stat-dir" style="color:var(--green)">—</div><div class="label">TX Directory</div></div>
+    </div>
+
+    <!-- Tabs: two walled-off groups -->
+    <div class="tabs">
+      <div class="tab-group">
+        <span class="tab-group-label">Find your car</span>
+        <div class="tab active" onclick="showTab('search', this)">🔍 Search</div>
+        <div class="tab"        onclick="showTab('all', this)">📋 All Listings</div>
+      </div>
+      <div class="tab-sep"></div>
+      <div class="tab-group">
+        <span class="tab-group-label">Build the database</span>
+        <div class="tab" onclick="showTab('dealers', this)">🏪 Dealer Scraping</div>
+        <div class="tab" onclick="showTab('online', this)">🌐 Online Search</div>
+        <div class="tab" onclick="showTab('activity', this)">📜 Activity Log</div>
+      </div>
+    </div>
+
+    <!-- ════ SEARCH tab — query the listings by criteria ════ -->
+    <div id="tab-search" class="tab-panel active">
+      <div class="panel">
+        <h3>What you're looking for</h3>
+        <div class="inline-row">
+          <div class="form-row"><label>Make</label><input id="cfg-make" type="text" placeholder="Toyota"></div>
+          <div class="form-row"><label>Model</label><input id="cfg-model" type="text" placeholder="Tacoma"></div>
+          <div class="form-row"><label>Transmission</label>
+            <select id="cfg-transmission">
+              <option value="">Any</option>
+              <option value="automatic">Automatic</option>
+              <option value="manual">Manual</option>
+            </select>
+          </div>
+        </div>
+        <div class="inline-row">
+          <div class="form-row"><label>Year from</label><input id="cfg-year-min" type="number" placeholder="2018"></div>
+          <div class="form-row"><label>Year to</label><input id="cfg-year-max" type="number" placeholder="2027"></div>
+          <div class="form-row"><label>Min price</label><input id="cfg-price-min" type="number" placeholder="0"></div>
+          <div class="form-row"><label>Max price</label><input id="cfg-price-max" type="number" placeholder="45000"></div>
+          <div class="form-row"><label>Max mileage</label><input id="cfg-mileage-max" type="number" placeholder="80000"></div>
+        </div>
+        <button class="btn btn-primary" onclick="loadSearch()" style="margin-top:4px;">🔎 Search</button>
+      </div>
+
+      <div class="toolbar">
+        <select id="s-sort" onchange="renderSearch()">
+          <option value="price">Price ↑</option>
+          <option value="mileage">Mileage ↑</option>
+          <option value="year">Year ↓</option>
+          <option value="distance">Distance ↑</option>
+        </select>
+        <label class="toggle-label"><input type="checkbox" id="s-real-price" checked onchange="loadSearch()"> Real prices only</label>
+        <label class="toggle-label"><input type="checkbox" id="s-hide-dupes" onchange="loadSearch()" checked> Hide duplicates</label>
+        <span style="margin-left:auto;font-size:.8rem;color:var(--muted)"><span id="search-count">0</span> results</span>
+      </div>
+      <div class="listings-grid" id="search-grid"></div>
+    </div>
+
+    <!-- ════ ALL LISTINGS tab — browse everything in the DB ════ -->
+    <div id="tab-all" class="tab-panel">
+      <div class="toolbar">
+        <select id="a-source" onchange="loadAll()">
+          <option value="">All Sources</option>
+          <option value="dealer">Direct Dealer</option>
+          <option value="autotrader">AutoTrader</option>
+          <option value="cargurus">CarGurus</option>
+          <option value="carmax">CarMax</option>
+          <option value="craigslist">Craigslist</option>
+        </select>
+        <select id="a-sort" onchange="renderAll()">
+          <option value="price">Price ↑</option>
+          <option value="mileage">Mileage ↑</option>
+          <option value="year">Year ↓</option>
+          <option value="distance">Distance ↑</option>
+        </select>
+        <label class="toggle-label"><input type="checkbox" id="a-real-price" checked onchange="loadAll()"> Real prices only</label>
+        <label class="toggle-label"><input type="checkbox" id="a-hide-dupes" onchange="loadAll()" checked> Hide duplicates</label>
+        <span style="margin-left:auto;font-size:.8rem;color:var(--muted)"><span id="all-count">0</span> listings</span>
+      </div>
+      <div class="listings-grid" id="all-grid"></div>
+    </div>
+
+    <!-- ════ DEALERS tab — directory + operations + status ════ -->
+    <div id="tab-dealers" class="tab-panel">
+      <div class="op-grid">
+        <div class="op-card">
+          <h4>➕ Find New Dealers</h4>
+          <p>Add dealers within your radius from the Texas master directory into your working set. (No scraping — just the list.)</p>
+          <button class="btn btn-violet btn-sm" id="btn-discover" onclick="runOp('discover')">Find dealers in radius</button>
+        </div>
+        <div class="op-card">
+          <h4>🏷️ Classify</h4>
+          <p>Test-scrape each dealer's website to sort which we <em>can</em> scrape vs not — and why.</p>
+          <div class="inline-row" style="gap:6px;">
+            <select id="classify-scope" style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 8px;font-size:.78rem;">
+              <option value="radius">Within radius</option>
+              <option value="all">All of Texas</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" id="btn-classify" onclick="runOp('classify')" style="white-space:nowrap;">Classify</button>
+          </div>
+        </div>
+        <div class="op-card">
+          <h4>🔄 Scan Inventory</h4>
+          <p>Re-scrape full inventory for scrapeable dealers in range: add new cars, mark missing ones sold.</p>
+          <button class="btn btn-success btn-sm" id="btn-scan" onclick="runOp('scan')">Scan inventory in radius</button>
+        </div>
+      </div>
+
+      <div class="progress-wrap" id="op-progress-wrap">
+        <div class="progress-bar"><div class="progress-fill" id="op-progress-fill" style="width:0%"></div></div>
+        <div class="progress-label" id="op-progress-label">—</div>
+      </div>
+
+      <div style="font-size:.78rem;color:var(--muted);margin:4px 0 16px;line-height:1.6;">
+        TX master directory: <b id="dir-total">—</b> dealers ·
+        in working set: <b id="dir-inrange">—</b> ·
+        scrapeable: <b id="dir-ok" style="color:var(--green)">—</b>
+      </div>
+
+      <div id="dealer-summary" class="stats-bar" style="margin-bottom:16px;"></div>
+      <table class="dealer-table">
+        <thead>
+          <tr><th>Dealership</th><th>City</th><th>Platform</th><th>Scrape status</th><th>Cars</th><th>Website</th></tr>
+        </thead>
+        <tbody id="dealer-tbody">
+          <tr><td colspan="6" style="color:var(--muted);text-align:center;padding:30px">No dealers yet. Use <strong>Find New Dealers</strong>.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ════ ONLINE SEARCH tab — acquire listings from aggregators ════ -->
+    <div id="tab-online" class="tab-panel">
+      <div class="panel">
+        <h3>Search live listing sites</h3>
+        <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px;line-height:1.5;">
+          Runs your saved criteria against external aggregators and adds any results to the database.
+          This is a <b>separate acquisition step</b> — it does not touch dealer scraping, and it is not the same as
+          browsing what's already stored (the Search tab). Heads-up: most of these sites actively block scrapers, so results are often empty.
+        </p>
+        <div class="source-toggles" id="source-toggles" style="flex-direction:row;flex-wrap:wrap;gap:8px;"></div>
+        <button class="btn btn-primary" id="btn-scrape" onclick="startScrape()" style="margin-top:14px;">🌐 Search live sources now</button>
+        <div class="progress-wrap" id="progress-wrap">
+          <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+          <div class="progress-label" id="progress-label">—</div>
+        </div>
+        <div style="font-size:.72rem;color:var(--muted);margin-top:6px;">Last live search: <span id="last-scrape">—</span></div>
+      </div>
+
+      <div class="toolbar">
+        <strong style="font-size:.95rem;">Results pulled from online sources</strong>
+        <span style="margin-left:auto;font-size:.8rem;color:var(--muted)"><span id="online-count">0</span> listings</span>
+      </div>
+      <div class="listings-grid" id="online-grid"></div>
+    </div>
+
+    <!-- ════ ACTIVITY LOG tab ════ -->
+    <div id="tab-activity" class="tab-panel">
+      <div class="toolbar">
+        <strong style="font-size:.95rem;">Activity Log</strong>
+        <span style="font-size:.78rem;color:var(--muted)">— what each run added, removed, or sold</span>
+        <button class="btn btn-ghost btn-sm" style="margin-left:auto;" onclick="loadActivity()">↻ Refresh</button>
+      </div>
+      <table class="dealer-table">
+        <thead><tr><th>When</th><th>Run</th><th>Action</th><th>Dealer</th><th>Detail</th></tr></thead>
+        <tbody id="activity-tbody">
+          <tr><td colspan="5" style="color:var(--muted);text-align:center;padding:30px">No activity yet. Run an operation in the <strong>Dealers</strong> tab.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+
+<script>
+let searchData = [], allData = [], scrapeInterval = null;
+
+// ── Boot ──────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', async () => {
+  await loadConfig();
+  loadStats();
+  loadSearch();           // Search is the default tab
+  loadDirectoryStats();
+  resumeRunningJobs();
+
+  ['cfg-make','cfg-model','cfg-year-min','cfg-year-max',
+   'cfg-price-min','cfg-price-max','cfg-mileage-max'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') loadSearch(); });
+  });
+});
+
+// ── Tabs ──────────────────────────────────────────────────────
+function showTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'all')      loadAll();
+  if (name === 'dealers')  { loadDealers(); loadDirectoryStats(); }
+  if (name === 'online')   loadOnline();
+  if (name === 'activity') loadActivity();
+}
+
+function refreshCurrent() {
+  const active = document.querySelector('.tab-panel.active');
+  if (!active) return;
+  ({ 'tab-search': loadSearch, 'tab-all': loadAll,
+     'tab-dealers': () => { loadDealers(); loadDirectoryStats(); },
+     'tab-activity': loadActivity }[active.id] || (()=>{}))();
+  loadStats();
+}
+
+// ── Listings: shared fetch + render ───────────────────────────
+async function fetchListings(params) {
+  document.getElementById('loading-spinner').style.display = 'flex';
+  const data = await (await fetch('/api/listings?' + params.toString())).json();
+  document.getElementById('loading-spinner').style.display = 'none';
+  return data;
+}
+
+function sortListings(data, sortBy) {
+  return [...data].sort((a, b) => {
+    if (sortBy === 'price')    return (a.price   || 9e9) - (b.price   || 9e9);
+    if (sortBy === 'mileage')  return (a.mileage || 9e9) - (b.mileage || 9e9);
+    if (sortBy === 'year')     return (b.year || 0) - (a.year || 0);
+    if (sortBy === 'distance') return (a.distance_mi || 9999) - (b.distance_mi || 9999);
+    return 0;
+  });
+}
+
+// When a SINGLE dealer has at least this many of the same year+make+model+trim,
+// collapse just that dealer's copies into one expandable "stack" card. The key
+// is scoped to the dealer (dealership_id) on purpose: two different dealers each
+// selling the same spec are NEVER merged — only one dealer's own multiples are.
+// Trim is part of the key, so a 2026 Camry LE stacks separately from a Camry SE.
+const GROUP_MIN = 4;
+const groupKey = l => [l.dealership_id ?? l.dealer_name ?? l.source ?? '?',
+                       l.year || '?', (l.make || '').toLowerCase().trim(),
+                       (l.model || '').toLowerCase().trim(),
+                       (l.trim || '').toLowerCase().trim()].join('|');
+
+function renderGrid(data, gridId, countId, sortId) {
+  const sorted = sortListings(data, document.getElementById(sortId).value);
+  document.getElementById(countId).textContent = sorted.length;
+  const grid = document.getElementById(gridId);
+  if (!sorted.length) {
+    grid.innerHTML = '<div class="empty"><div class="icon">🔍</div><p>No listings match. Try widening your criteria, or run a <strong>Scan Inventory</strong> in the Dealers tab.</p></div>';
+    return;
+  }
+  // bucket by year+make+model, preserving the sorted order
+  const buckets = new Map();
+  for (const l of sorted) {
+    const k = groupKey(l);
+    (buckets.get(k) || buckets.set(k, []).get(k)).push(l);
+  }
+  // emit groups (>= GROUP_MIN) once at their first occurrence, singles inline
+  let html = '', gi = 0;
+  const done = new Set();
+  for (const l of sorted) {
+    const k = groupKey(l), bucket = buckets.get(k);
+    if (bucket.length >= GROUP_MIN) {
+      if (done.has(k)) continue;
+      done.add(k);
+      html += groupCardHTML(bucket, gridId + '-g' + (gi++));
+    } else {
+      html += cardHTML(l);
+    }
+  }
+  grid.innerHTML = html;
+}
+
+function groupCardHTML(items, gid) {
+  const first = items.find(x => x.image_url) || items[0];
+  const year = first.year || '', make = first.make || '', model = first.model || '', trim = first.trim || '';
+  const prices = items.map(x => x.price).filter(Boolean);
+  const minP = prices.length ? Math.min(...prices) : null;
+  const maxP = prices.length ? Math.max(...prices) : null;
+  const priceStr = minP == null ? '—'
+    : minP === maxP ? '$' + minP.toLocaleString()
+    : '$' + minP.toLocaleString() + ' – $' + maxP.toLocaleString();
+  const dealers = [...new Set(items.map(x => x.dealer_name).filter(Boolean))];
+  const dealerStr = dealers.length === 1 ? dealers[0]
+                  : dealers.length ? dealers.length + ' dealers' : first.source;
+  const colors = [...new Set(items.map(x => (x.exterior_color || '').trim()).filter(Boolean))];
+  const colorStr = colors.length ? 'Colors: ' + colors.slice(0, 4).join(', ') + (colors.length > 4 ? '…' : '') : '';
+
+  const img = first.image_url
+    ? `<img class="car-img" src="${first.image_url}" alt="${year} ${make} ${model}" loading="lazy" onerror="this.style.display='none'">`
+    : `<div class="car-img-placeholder">🚗</div>`;
+
+  return `
+  <div class="car-card group-card">
+    <span class="group-count-badge">${items.length} in stock</span>
+    ${img}
+    <div class="car-body">
+      <div class="car-title">${year} ${make} ${model}${trim ? ' ' + trim : ''}</div>
+      <div class="price-range">${priceStr}</div>
+      <div class="car-meta">
+        <span class="badge badge-source">🏢 ${dealerStr}</span>
+        <span class="badge badge-dist">${items.length} listings</span>
+      </div>
+      ${colorStr ? `<div style="font-size:.78rem;color:var(--muted);margin-top:6px;">${colorStr}</div>` : ''}
+    </div>
+    <button class="group-toggle" onclick="toggleGroup('${gid}', this)">
+      <span class="lbl">Show all ${items.length}</span> <span class="chev">▾</span>
+    </button>
+  </div>
+  <div class="group-expand" id="${gid}">
+    <div class="group-expand-head">${dealerStr} · ${year} ${make} ${model}${trim ? ' ' + trim : ''} — ${items.length} unique listings</div>
+    <div class="listings-grid">${items.map(cardHTML).join('')}</div>
+  </div>`;
+}
+
+function toggleGroup(gid, btn) {
+  const el = document.getElementById(gid);
+  if (!el) return;
+  const open = el.classList.toggle('open');
+  btn.classList.toggle('open', open);
+  btn.querySelector('.lbl').textContent = open
+    ? 'Hide listings' : 'Show all ' + el.querySelectorAll('.car-card').length;
+}
+
+// Search tab — applies the criteria form
+async function loadSearch() {
+  const p = new URLSearchParams();
+  p.set('hide_duplicates', document.getElementById('s-hide-dupes').checked ? '1' : '0');
+  if (document.getElementById('s-real-price').checked) p.set('real_price_only', '1');
+  const addText = (k, id) => { const v = document.getElementById(id).value.trim(); if (v) p.set(k, v); };
+  const addNum  = (k, id) => { const v = document.getElementById(id).value.trim(); if (v && +v !== 0) p.set(k, v); };
+  addText('make', 'cfg-make'); addText('model', 'cfg-model');
+  addNum('year_min', 'cfg-year-min');  addNum('year_max', 'cfg-year-max');
+  addNum('price_min', 'cfg-price-min'); addNum('price_max', 'cfg-price-max');
+  addNum('mileage_max', 'cfg-mileage-max');
+  const t = document.getElementById('cfg-transmission').value; if (t) p.set('transmission', t);
+  searchData = await fetchListings(p);
+  renderSearch();
+}
+function renderSearch() { renderGrid(searchData, 'search-grid', 'search-count', 's-sort'); }
+
+// All Listings tab — browse everything, no make/model criteria
+async function loadAll() {
+  const p = new URLSearchParams();
+  p.set('hide_duplicates', document.getElementById('a-hide-dupes').checked ? '1' : '0');
+  if (document.getElementById('a-real-price').checked) p.set('real_price_only', '1');
+  const src = document.getElementById('a-source').value; if (src) p.set('source', src);
+  allData = await fetchListings(p);
+  renderAll();
+}
+function renderAll() { renderGrid(allData, 'all-grid', 'all-count', 'a-sort'); }
+
+function cardHTML(l) {
+  const price   = l.price   ? '$' + l.price.toLocaleString() : '—';
+  const miles   = l.mileage ? l.mileage.toLocaleString() + ' mi' : '';
+  const year    = l.year    || '';
+  const make    = l.make    || '';
+  const model   = l.model   || '';
+  const dist    = l.distance_mi ? l.distance_mi.toFixed(0) + ' mi away' : '';
+  const isDup   = l.is_duplicate === 1;
+  const dupCount = l.duplicate_count || 1;
+
+  const img = l.image_url
+    ? `<img class="car-img" src="${l.image_url}" alt="${year} ${make} ${model}" loading="lazy" onerror="this.style.display='none'">`
+    : `<div class="car-img-placeholder">🚗</div>`;
+
+  const dupBadge = (dupCount > 1 && l.duplicate_group_id)
+    ? `<span class="badge badge-dup" style="cursor:pointer" title="Show which dealers list this car" onclick="toggleSites(this, ${l.duplicate_group_id})">📋 Listed on ${dupCount} sites ▾</span>`
+    : (dupCount > 1 ? `<span class="badge badge-dup">📋 Listed on ${dupCount} sites</span>` : '');
+
+  let transBadge = '';
+  if (l.transmission) {
+    const t = l.transmission.toLowerCase();
+    const isManual = t.includes('manual') && !t.includes('automat');
+    transBadge = `<span class="badge badge-dist" title="${l.transmission}">${isManual ? '⚙️ Manual' : '🅰️ Auto'}</span>`;
+  }
+
+  return `
+  <div class="car-card ${isDup ? 'is-duplicate' : ''}">
+    ${img}
+    <div class="car-body">
+      <div class="car-title">${year} ${make} ${model} ${l.trim || ''}</div>
+      <div class="car-price">${price}</div>
+      <div class="car-meta">
+        <span class="badge badge-source">${l.source}</span>
+        ${miles ? `<span class="badge badge-mileage">${miles}</span>` : ''}
+        ${transBadge}
+        ${dist  ? `<span class="badge badge-dist">${dist}</span>` : ''}
+        ${dupBadge}
+        ${isDup ? '<span class="badge" style="background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.3)">Cheaper elsewhere</span>' : ''}
+      </div>
+      ${l.exterior_color ? `<div style="font-size:.78rem;color:var(--muted);margin-top:6px;">🎨 ${l.exterior_color}</div>` : ''}
+      <div class="sites-panel" style="display:none"></div>
+    </div>
+    <div class="car-footer">
+      <a href="${l.url}" target="_blank" class="btn btn-primary btn-sm">View Listing →</a>
+    </div>
+  </div>`;
+}
+
+// Expand the "Listed on N sites" badge to reveal which dealers list this exact
+// car (its duplicate group). Lazy-loaded on first open so it never adds weight
+// until the user asks for it.
+async function toggleSites(badge, groupId) {
+  const panel = badge.closest('.car-card').querySelector('.sites-panel');
+  if (panel.style.display !== 'none') {
+    panel.style.display = 'none';
+    badge.innerHTML = badge.innerHTML.replace('▴', '▾');
+    return;
+  }
+  panel.style.display = 'block';
+  badge.innerHTML = badge.innerHTML.replace('▾', '▴');
+  if (!panel.dataset.loaded) {
+    panel.innerHTML = '<div class="sites-loading">Loading…</div>';
+    try {
+      const rows = await (await fetch('/api/duplicates/' + groupId)).json();
+      panel.innerHTML = rows.map(r => {
+        const p    = r.price ? '$' + r.price.toLocaleString() : '—';
+        const name = r.dealer_name || r.source || 'Unknown';
+        const best = r.is_duplicate === 0 ? ' <span class="site-best">cheapest</span>' : '';
+        return `<div class="site-row"><a href="${r.url}" target="_blank" title="${name}">${name}</a><span class="site-price">${p}${best}</span></div>`;
+      }).join('') || '<div class="sites-loading">No other listings found.</div>';
+      panel.dataset.loaded = '1';
+    } catch (e) {
+      panel.innerHTML = '<div class="sites-loading">Couldn\'t load listings.</div>';
+    }
+  }
+}
+
+// ── Dealer operations (discover / classify / scan) ────────────
+const OP_CONFIG = {
+  discover: { url: '/api/dealers/discover', btn: 'btn-discover', label: 'Find dealers in radius' },
+  classify: { url: '/api/dealers/classify', btn: 'btn-classify', label: 'Classify' },
+  scan:     { url: '/api/dealers/scan',     btn: 'btn-scan',     label: 'Scan inventory in radius' },
+};
+let opInterval = null;
+
+async function runOp(op) {
+  const c = OP_CONFIG[op];
+  await saveConfig();
+  Object.values(OP_CONFIG).forEach(o => document.getElementById(o.btn).disabled = true);
+  document.getElementById('op-progress-wrap').classList.add('show');
+
+  const body = (op === 'classify') ? { scope: document.getElementById('classify-scope').value } : {};
+  const r = await fetch(c.url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (!r.ok) {
+    const e = await r.json().catch(()=>({}));
+    showToast(e.error || 'Error', 'red');
+    resetOpButtons();
+    return;
+  }
+  opInterval = setInterval(() => pollOp(op), 1500);
+}
+
+async function pollOp(op) {
+  const s = await (await fetch(`/api/job/${op}/status`)).json();
+  document.getElementById('op-progress-fill').style.width = s.progress + '%';
+  document.getElementById('op-progress-label').textContent = s.message;
+  if (!s.running && (s.progress >= 100 || (s.message||'').includes('Error'))) {
+    clearInterval(opInterval);
+    resetOpButtons();
+    loadStats(); loadDealers(); loadDirectoryStats(); loadActivity();
+    if (op === 'scan') { loadSearch(); }
+    const err = (s.message||'').includes('Error');
+    showToast(err ? s.message : `${OP_CONFIG[op].label} complete`, err ? 'red' : 'green');
+  }
+}
+
+function resetOpButtons() {
+  Object.values(OP_CONFIG).forEach(o => {
+    const b = document.getElementById(o.btn);
+    b.disabled = false; b.textContent = o.label;
+  });
+}
+
+async function resumeRunningJobs() {
+  for (const op of ['discover','classify','scan']) {
+    try {
+      const s = await (await fetch(`/api/job/${op}/status`)).json();
+      if (s.running) {
+        document.getElementById('op-progress-wrap').classList.add('show');
+        Object.entries(OP_CONFIG).forEach(([o, cfg]) => {
+          const b = document.getElementById(cfg.btn);
+          b.disabled = true;
+          if (o === op) b.textContent = '⏳ running…';
+        });
+        document.getElementById('op-progress-fill').style.width = s.progress + '%';
+        document.getElementById('op-progress-label').textContent = s.message;
+        if (opInterval) clearInterval(opInterval);
+        opInterval = setInterval(() => pollOp(op), 1500);
+        return;
+      }
+    } catch (e) {}
+  }
+}
+
+async function loadDirectoryStats() {
+  try {
+    const d = await (await fetch('/api/directory/stats')).json();
+    document.getElementById('dir-total').textContent = d.total.toLocaleString();
+    document.getElementById('stat-dir').textContent  = d.total.toLocaleString();
+    const lists = await (await fetch('/api/dealers/lists')).json();
+    document.getElementById('dir-ok').textContent = lists.can_scrape.length;
+    document.getElementById('dir-inrange').textContent = lists.can_scrape.length + lists.cannot_scrape.length;
+  } catch (e) {}
+}
+
+async function loadActivity() {
+  const rows = await (await fetch('/api/scan-log?limit=300')).json();
+  const tb = document.getElementById('activity-tbody');
+  if (!rows.length) return;
+  const color = { dealer_added:'var(--accent2)', listing_added:'var(--green)',
+                  listing_sold:'var(--red)', summary:'var(--accent)', info:'var(--muted)' };
+  tb.innerHTML = rows.map(r => `
+    <tr>
+      <td style="color:var(--muted);white-space:nowrap">${(r.ran_at||'').replace('T',' ').slice(5,16)}</td>
+      <td>${r.run_type||''}</td>
+      <td><span class="badge" style="background:${(color[r.action]||'var(--muted)')}22;color:${color[r.action]||'var(--muted)'};border:1px solid ${color[r.action]||'var(--muted)'}55">${(r.action||'').replace('listing_','').replace('dealer_','')}</span></td>
+      <td>${r.dealer||''}</td>
+      <td style="color:var(--muted);font-size:.8rem">${r.detail||''}</td>
+    </tr>`).join('');
+}
+
+// ── Config ────────────────────────────────────────────────────
+async function loadConfig() {
+  const cfg = await (await fetch('/api/config')).json();
+  document.getElementById('cfg-make').value        = cfg.search.make || '';
+  document.getElementById('cfg-model').value       = cfg.search.model || '';
+  document.getElementById('cfg-year-min').value    = cfg.search.year_min || '';
+  document.getElementById('cfg-year-max').value    = cfg.search.year_max || '';
+  document.getElementById('cfg-price-min').value   = cfg.search.price_min || '';
+  document.getElementById('cfg-price-max').value   = cfg.search.price_max || '';
+  document.getElementById('cfg-mileage-max').value = cfg.search.mileage_max || '';
+  document.getElementById('cfg-zip').value          = cfg.location.zip || '';
+  document.getElementById('cfg-radius').value       = cfg.location.radius || 50;
+  renderSourceToggles(cfg.sources);
+}
+
+function renderSourceToggles(sources) {
+  const icons = { autotrader:'🔵', cargurus:'🟢', carmax:'🔴', craigslist:'🟠', facebook:'📘' };
+  const wrap = document.getElementById('source-toggles');
+  wrap.innerHTML = '';
+  Object.entries(sources).filter(([name]) => name !== 'dealers').forEach(([name, enabled]) => {
+    const div = document.createElement('div');
+    div.className = 'source-toggle' + (enabled ? ' active' : '');
+    div.dataset.source = name;
+    div.innerHTML = `<span>${icons[name]||'⚪'} ${name}</span><div class="dot"></div>`;
+    div.onclick = () => div.classList.toggle('active');
+    wrap.appendChild(div);
+  });
+}
+
+async function saveConfig() {
+  const sources = {};
+  document.querySelectorAll('.source-toggle').forEach(el => { sources[el.dataset.source] = el.classList.contains('active'); });
+  const payload = {
+    search: {
+      make:        document.getElementById('cfg-make').value,
+      model:       document.getElementById('cfg-model').value,
+      year_min:    +document.getElementById('cfg-year-min').value || null,
+      year_max:    +document.getElementById('cfg-year-max').value || null,
+      price_min:   +document.getElementById('cfg-price-min').value || 0,
+      price_max:   +document.getElementById('cfg-price-max').value || 0,
+      mileage_max: +document.getElementById('cfg-mileage-max').value || 0,
+    },
+    location: { zip: document.getElementById('cfg-zip').value, radius: +document.getElementById('cfg-radius').value || 50 },
+    sources,
+  };
+  await fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  showToast('Settings saved!');
+}
+
+// ── Online Search tab — listings acquired from aggregators ────
+async function loadOnline() {
+  const sources = ['autotrader','cargurus','carmax','craigslist'];
+  let all = [];
+  for (const s of sources) {
+    try { all = all.concat(await (await fetch('/api/listings?source=' + s)).json()); } catch (e) {}
+  }
+  document.getElementById('online-count').textContent = all.length;
+  const grid = document.getElementById('online-grid');
+  grid.innerHTML = all.length
+    ? all.map(cardHTML).join('')
+    : '<div class="empty"><div class="icon">🌐</div><p>No online-source listings yet. These aggregators block scrapers, so this is usually empty.<br>Dealer listings live in the <strong>Search</strong> / <strong>All Listings</strong> tabs.</p></div>';
+}
+
+// ── Live online search (AutoTrader/etc.) ──────────────────────
+async function startScrape() {
+  await saveConfig();
+  const btn = document.getElementById('btn-scrape');
+  btn.disabled = true; btn.textContent = '⏳ Searching…';
+  document.getElementById('progress-wrap').classList.add('show');
+  const r = await fetch('/api/search', { method:'POST' });
+  if (!r.ok) { showToast('Error', 'red'); btn.disabled = false; btn.textContent = '🔍 Search live sources'; return; }
+  scrapeInterval = setInterval(pollScrapeStatus, 1500);
+}
+
+async function pollScrapeStatus() {
+  const s = await (await fetch('/api/search/status')).json();
+  document.getElementById('progress-fill').style.width = s.progress + '%';
+  document.getElementById('progress-label').textContent = s.message;
+  if (!s.running && (s.progress >= 100 || (s.message||'').includes('Error'))) {
+    clearInterval(scrapeInterval);
+    const btn = document.getElementById('btn-scrape');
+    btn.disabled = false; btn.textContent = '🌐 Search live sources now';
+    loadStats(); loadOnline();
+    showToast((s.message||'').includes('Error') ? s.message : 'Live search complete!',
+              (s.message||'').includes('Error') ? 'red' : 'green');
+  }
+}
+
+// ── Stats ─────────────────────────────────────────────────────
+async function loadStats() {
+  const s = await (await fetch('/api/stats')).json();
+  document.getElementById('stat-total').textContent   = s.total.toLocaleString();
+  document.getElementById('stat-dupes').textContent   = s.duplicates.toLocaleString();
+  document.getElementById('stat-dealers').textContent = s.dealerships.toLocaleString();
+  document.getElementById('last-scrape').textContent  = s.last_scrape === 'Never' ? 'Never' : new Date(s.last_scrape + 'Z').toLocaleString();
+}
+
+// ── Dealers table ─────────────────────────────────────────────
+const STATUS_COLORS = { ok:'var(--green)', blocked:'var(--yellow)', empty:'var(--accent)',
+                        unsupported:'var(--muted)', unreachable:'var(--red)', error:'var(--red)' };
+
+function statusBadge(status, note) {
+  if (!status) return '<span style="color:var(--muted)">— not yet classified</span>';
+  const color = STATUS_COLORS[status] || 'var(--muted)';
+  const title = (note || '').replace(/"/g, '&quot;');
+  return `<span class="badge" title="${title}" style="background:${color}22;color:${color};border:1px solid ${color}55;cursor:help">${status}</span>`;
+}
+
+async function loadDealers() {
+  const dealers = await (await fetch('/api/dealerships')).json();
+  const tbody = document.getElementById('dealer-tbody');
+
+  const counts = {};
+  dealers.forEach(d => { const s = d.scrape_status || 'pending'; counts[s] = (counts[s]||0)+1; });
+  const order = ['ok','blocked','empty','unsupported','unreachable','pending'];
+  document.getElementById('dealer-summary').innerHTML =
+    order.filter(s => counts[s]).map(s => {
+      const color = STATUS_COLORS[s] || 'var(--muted)';
+      return `<div class="stat-card"><div class="num" style="color:${color}">${counts[s]}</div><div class="label">${s}</div></div>`;
+    }).join('');
+
+  if (!dealers.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:30px">No dealers yet. Use <strong>Find New Dealers</strong>.</td></tr>';
+    return;
+  }
+  dealers.sort((a,b) => (b.active_listings||0) - (a.active_listings||0) || (a.name||'').localeCompare(b.name||''));
+  tbody.innerHTML = dealers.map(d => `
+    <tr>
+      <td>${d.name}${d.distance_mi != null ? ` <span style="color:var(--muted);font-size:.78rem">· ${d.distance_mi.toFixed(0)}mi</span>` : ''}</td>
+      <td>${d.city || ''}, ${d.state || ''}</td>
+      <td style="color:var(--muted)">${d.platform || '—'}</td>
+      <td>${statusBadge(d.scrape_status, d.scrape_note)}</td>
+      <td style="font-weight:700" title="Cars currently in our database for this dealer (from the last Scan Inventory). Classify alone does not load cars.">${d.active_listings != null ? d.active_listings : 0}</td>
+      <td>${d.website ? `<a href="${d.website}" target="_blank" style="color:var(--accent)">Visit ↗</a>` : '—'}</td>
+    </tr>`).join('');
+}
+
+// ── Toast ─────────────────────────────────────────────────────
+function showToast(msg, color = 'green') {
+  const t = document.createElement('div');
+  t.textContent = msg;
+  t.style.cssText = `position:fixed;bottom:24px;right:24px;background:${color === 'green' ? 'var(--green)' : color === 'red' ? 'var(--red)' : 'var(--accent)'};color:#000;padding:10px 18px;border-radius:8px;font-weight:600;font-size:.85rem;z-index:9999;box-shadow:var(--shadow);`;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3500);
+}
+</script>
+</body>
+</html>

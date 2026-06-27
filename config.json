@@ -1,0 +1,28 @@
+{
+    "search": {
+        "make": "",
+        "model": "",
+        "year_min": null,
+        "year_max": 2027,
+        "price_min": 1000,
+        "price_max": 0,
+        "mileage_max": 0
+    },
+    "location": {
+        "zip": "78664",
+        "radius": 10
+    },
+    "sources": {
+        "autotrader": false,
+        "cargurus": false,
+        "carmax": false,
+        "craigslist": false,
+        "facebook": false
+    },
+    "duplicate": {
+        "use_vin": true,
+        "fuzzy_threshold": 85
+    },
+    "db_path": "data/cars.db",
+    "auto_refresh_hours": 6
+}

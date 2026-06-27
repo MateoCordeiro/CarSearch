@@ -1,0 +1,8 @@
+flask
+requests
+curl_cffi
+beautifulsoup4
+rapidfuzz
+geopy
+apscheduler
+python-dotenv
