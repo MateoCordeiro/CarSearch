@@ -81,6 +81,13 @@
   .toggle-label { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; cursor: pointer; }
   .toggle-label input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; }
 
+  .pager { display: flex; align-items: center; gap: 10px; margin: 12px 0; flex-wrap: wrap; font-size: .82rem; color: var(--muted); }
+  .pager:empty { display: none; }
+  .pager .pager-info { font-weight: 600; }
+  .pager .pager-size { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .pager .pager-size select { padding: 3px 6px; }
+  .pager button[disabled] { opacity: .4; cursor: not-allowed; }
+
   .listings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
   .car-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; transition: border-color .15s, transform .15s; }
   .car-card:hover { border-color: var(--accent); transform: translateY(-2px); }
@@ -239,17 +246,20 @@
       </div>
 
       <div class="toolbar">
-        <select id="s-sort" onchange="renderSearch()">
-          <option value="price">Price ↑</option>
-          <option value="mileage">Mileage ↑</option>
-          <option value="year">Year ↓</option>
-          <option value="distance">Distance ↑</option>
+        <select id="s-sort" onchange="onSortField('search')">
+          <option value="price">Price</option>
+          <option value="mileage">Mileage</option>
+          <option value="year">Year</option>
+          <option value="distance">Distance</option>
         </select>
+        <button id="s-dir" class="btn btn-sm" title="Sort ascending (low → high · oldest → newest) — click to flip" onclick="toggleDir('search')">↑</button>
         <label class="toggle-label"><input type="checkbox" id="s-real-price" checked onchange="loadSearch()"> Real prices only</label>
         <label class="toggle-label"><input type="checkbox" id="s-hide-dupes" onchange="loadSearch()" checked> Hide duplicates</label>
         <span style="margin-left:auto;font-size:.8rem;color:var(--muted)"><span id="search-count">0</span> results</span>
       </div>
+      <div class="pager" id="search-pager-top"></div>
       <div class="listings-grid" id="search-grid"></div>
+      <div class="pager" id="search-pager-bottom"></div>
     </div>
 
     <!-- ════ ALL LISTINGS tab — browse everything in the DB ════ -->
@@ -263,17 +273,20 @@
           <option value="carmax">CarMax</option>
           <option value="craigslist">Craigslist</option>
         </select>
-        <select id="a-sort" onchange="renderAll()">
-          <option value="price">Price ↑</option>
-          <option value="mileage">Mileage ↑</option>
-          <option value="year">Year ↓</option>
-          <option value="distance">Distance ↑</option>
+        <select id="a-sort" onchange="onSortField('all')">
+          <option value="price">Price</option>
+          <option value="mileage">Mileage</option>
+          <option value="year">Year</option>
+          <option value="distance">Distance</option>
         </select>
+        <button id="a-dir" class="btn btn-sm" title="Sort ascending (low → high · oldest → newest) — click to flip" onclick="toggleDir('all')">↑</button>
         <label class="toggle-label"><input type="checkbox" id="a-real-price" checked onchange="loadAll()"> Real prices only</label>
         <label class="toggle-label"><input type="checkbox" id="a-hide-dupes" onchange="loadAll()" checked> Hide duplicates</label>
         <span style="margin-left:auto;font-size:.8rem;color:var(--muted)"><span id="all-count">0</span> listings</span>
       </div>
+      <div class="pager" id="all-pager-top"></div>
       <div class="listings-grid" id="all-grid"></div>
+      <div class="pager" id="all-pager-bottom"></div>
     </div>
 
     <!-- ════ DEALERS tab — directory + operations + status ════ -->
@@ -316,10 +329,10 @@
       <div id="dealer-summary" class="stats-bar" style="margin-bottom:16px;"></div>
       <table class="dealer-table">
         <thead>
-          <tr><th>Dealership</th><th>City</th><th>Platform</th><th>Scrape status</th><th>Cars</th><th>Website</th></tr>
+          <tr><th>Dealership</th><th>City</th><th>Platform</th><th>Scrape status</th><th>Quality</th><th>Cars</th><th>Website</th></tr>
         </thead>
         <tbody id="dealer-tbody">
-          <tr><td colspan="6" style="color:var(--muted);text-align:center;padding:30px">No dealers yet. Use <strong>Find New Dealers</strong>.</td></tr>
+          <tr><td colspan="7" style="color:var(--muted);text-align:center;padding:30px">No dealers yet. Use <strong>Find New Dealers</strong>.</td></tr>
         </tbody>
       </table>
     </div>
@@ -412,14 +425,44 @@ async function fetchListings(params) {
   return data;
 }
 
-function sortListings(data, sortBy) {
+// Sort by any field in EITHER direction. Missing values always sort LAST
+// (not 0/9e9 placeholders), regardless of direction — so flipping the order
+// never floods the top with blank prices/mileages.
+const SORT_FIELD = { price:'price', mileage:'mileage', year:'year', distance:'distance_mi' };
+const SORT_DEFAULT_DIR = { price:'asc', mileage:'asc', year:'desc', distance:'asc' };
+const DIR = { search: 'asc', all: 'asc' };
+function sortListings(data, sortBy, dir) {
+  const field = SORT_FIELD[sortBy] || 'price';
+  const mult = dir === 'desc' ? -1 : 1;
+  const num = l => { const v = l[field]; return (v === null || v === undefined || v === '') ? null : v; };
   return [...data].sort((a, b) => {
-    if (sortBy === 'price')    return (a.price   || 9e9) - (b.price   || 9e9);
-    if (sortBy === 'mileage')  return (a.mileage || 9e9) - (b.mileage || 9e9);
-    if (sortBy === 'year')     return (b.year || 0) - (a.year || 0);
-    if (sortBy === 'distance') return (a.distance_mi || 9999) - (b.distance_mi || 9999);
-    return 0;
+    const av = num(a), bv = num(b);
+    if (av === null) return bv === null ? 0 : 1;   // a missing → after b
+    if (bv === null) return -1;                    // b missing → after a
+    return (av - bv) * mult;
   });
+}
+
+function updateDirButton(which) {
+  const b = document.getElementById(which === 'search' ? 's-dir' : 'a-dir');
+  if (!b) return;
+  const asc = DIR[which] === 'asc';
+  b.textContent = asc ? '↑' : '↓';
+  b.title = 'Sort ' + (asc ? 'ascending (low → high · oldest → newest)'
+                            : 'descending (high → low · newest → oldest)') + ' — click to flip';
+}
+// Changing the FIELD resets to that field's natural direction (year → newest,
+// price/mileage/distance → lowest first); the arrow button flips from there.
+function onSortField(which) {
+  const field = document.getElementById(gridIds(which).sort).value;
+  DIR[which] = SORT_DEFAULT_DIR[field] || 'asc';
+  updateDirButton(which);
+  which === 'search' ? renderSearch() : renderAll();
+}
+function toggleDir(which) {
+  DIR[which] = DIR[which] === 'asc' ? 'desc' : 'asc';
+  updateDirButton(which);
+  which === 'search' ? renderSearch() : renderAll();
 }
 
 // When a SINGLE dealer has at least this many of the same year+make+model+trim,
@@ -433,35 +476,74 @@ const groupKey = l => [l.dealership_id ?? l.dealer_name ?? l.source ?? '?',
                        (l.model || '').toLowerCase().trim(),
                        (l.trim || '').toLowerCase().trim()].join('|');
 
-function renderGrid(data, gridId, countId, sortId) {
-  const sorted = sortListings(data, document.getElementById(sortId).value);
-  document.getElementById(countId).textContent = sorted.length;
-  const grid = document.getElementById(gridId);
+// Pagination state per tab. We page the RENDERED OUTPUT (after sort+grouping)
+// client-side so only ~`size` cards hit the DOM at once — the full result set
+// is already in memory (searchData/allData), so paging never re-fetches.
+const PAGE = { search: { page: 0, size: 100 }, all: { page: 0, size: 100 } };
+const PAGE_SIZES = [50, 100, 200, 500];
+function gridIds(which) {
+  return which === 'search'
+    ? { grid:'search-grid', count:'search-count', sort:'s-sort', data:() => searchData }
+    : { grid:'all-grid',    count:'all-count',    sort:'a-sort', data:() => allData };
+}
+
+function renderGrid(which) {
+  const ids = gridIds(which), st = PAGE[which];
+  const sorted = sortListings(ids.data(), document.getElementById(ids.sort).value, DIR[which]);
+  document.getElementById(ids.count).textContent = sorted.length;
+  const grid = document.getElementById(ids.grid);
   if (!sorted.length) {
     grid.innerHTML = '<div class="empty"><div class="icon">🔍</div><p>No listings match. Try widening your criteria, or run a <strong>Scan Inventory</strong> in the Dealers tab.</p></div>';
+    renderPager(which, 0);
     return;
   }
-  // bucket by year+make+model, preserving the sorted order
+  // Build render UNITS first (a >=GROUP_MIN dealer stack = 1 unit, else 1 card),
+  // preserving sorted order, THEN paginate the units so a page holds `size` cards.
   const buckets = new Map();
-  for (const l of sorted) {
-    const k = groupKey(l);
-    (buckets.get(k) || buckets.set(k, []).get(k)).push(l);
-  }
-  // emit groups (>= GROUP_MIN) once at their first occurrence, singles inline
-  let html = '', gi = 0;
-  const done = new Set();
+  for (const l of sorted) { const k = groupKey(l); (buckets.get(k) || buckets.set(k, []).get(k)).push(l); }
+  const units = [], done = new Set();
   for (const l of sorted) {
     const k = groupKey(l), bucket = buckets.get(k);
-    if (bucket.length >= GROUP_MIN) {
-      if (done.has(k)) continue;
-      done.add(k);
-      html += groupCardHTML(bucket, gridId + '-g' + (gi++));
-    } else {
-      html += cardHTML(l);
-    }
+    if (bucket.length >= GROUP_MIN) { if (done.has(k)) continue; done.add(k); units.push(bucket); }
+    else units.push(l);
   }
+  const pages = Math.max(1, Math.ceil(units.length / st.size));
+  st.page = Math.min(Math.max(0, st.page), pages - 1);
+  const slice = units.slice(st.page * st.size, st.page * st.size + st.size);
+  let html = '', gi = 0;
+  for (const u of slice) html += Array.isArray(u) ? groupCardHTML(u, ids.grid + '-g' + (gi++)) : cardHTML(u);
   grid.innerHTML = html;
+  renderPager(which, units.length);
 }
+
+function renderPager(which, totalUnits) {
+  const st = PAGE[which];
+  const pages = Math.max(1, Math.ceil(totalUnits / st.size));
+  const cur = Math.min(Math.max(0, st.page), pages - 1);
+  const start = totalUnits ? cur * st.size + 1 : 0;
+  const end = Math.min(totalUnits, (cur + 1) * st.size);
+  const html = totalUnits <= st.size && cur === 0 && totalUnits <= PAGE_SIZES[0]
+    ? ''   // nothing to page — keep the bar clean for tiny result sets
+    : `<button class="btn btn-sm" ${cur <= 0 ? 'disabled' : ''} onclick="changePage('${which}',-1)">← Prev</button>
+       <span class="pager-info">Page ${cur + 1} / ${pages} · ${start}–${end} of ${totalUnits}</span>
+       <button class="btn btn-sm" ${cur >= pages - 1 ? 'disabled' : ''} onclick="changePage('${which}',1)">Next →</button>
+       <label class="pager-size">Per page
+         <select onchange="setPageSize('${which}', this.value)">
+           ${PAGE_SIZES.map(n => `<option value="${n}" ${n === st.size ? 'selected' : ''}>${n}</option>`).join('')}
+         </select></label>`;
+  for (const pos of ['top', 'bottom']) {
+    const el = document.getElementById(`${which}-pager-${pos}`);
+    if (el) el.innerHTML = html;
+  }
+}
+
+function changePage(which, delta) {
+  PAGE[which].page += delta;
+  renderGrid(which);
+  const g = document.getElementById(gridIds(which).grid);
+  if (g) g.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function setPageSize(which, val) { PAGE[which].size = +val; PAGE[which].page = 0; renderGrid(which); }
 
 function groupCardHTML(items, gid) {
   const first = items.find(x => x.image_url) || items[0];
@@ -529,7 +611,7 @@ async function loadSearch() {
   searchData = await fetchListings(p);
   renderSearch();
 }
-function renderSearch() { renderGrid(searchData, 'search-grid', 'search-count', 's-sort'); }
+function renderSearch() { PAGE.search.page = 0; renderGrid('search'); }
 
 // All Listings tab — browse everything, no make/model criteria
 async function loadAll() {
@@ -540,7 +622,7 @@ async function loadAll() {
   allData = await fetchListings(p);
   renderAll();
 }
-function renderAll() { renderGrid(allData, 'all-grid', 'all-count', 'a-sort'); }
+function renderAll() { PAGE.all.page = 0; renderGrid('all'); }
 
 function cardHTML(l) {
   const price   = l.price   ? '$' + l.price.toLocaleString() : '—';
@@ -812,7 +894,8 @@ async function loadStats() {
 
 // ── Dealers table ─────────────────────────────────────────────
 const STATUS_COLORS = { ok:'var(--green)', blocked:'var(--yellow)', empty:'var(--accent)',
-                        unsupported:'var(--muted)', unreachable:'var(--red)', error:'var(--red)' };
+                        unsupported:'var(--muted)', unreachable:'var(--red)', error:'var(--red)',
+                        duplicate:'var(--muted)' };
 
 function statusBadge(status, note) {
   if (!status) return '<span style="color:var(--muted)">— not yet classified</span>';
@@ -821,13 +904,23 @@ function statusBadge(status, note) {
   return `<span class="badge" title="${title}" style="background:${color}22;color:${color};border:1px solid ${color}55;cursor:help">${status}</span>`;
 }
 
+// Phase 5 — data-quality indicator. score 0-100 over the dealer's active
+// listings; flags (synthetic_urls, missing_vin/price/mileage/image) on hover.
+function qualityBadge(score, flags) {
+  if (score == null) return '<span style="color:var(--muted)">—</span>';
+  const color = score >= 80 ? 'var(--green)' : score >= 60 ? 'var(--yellow)' : 'var(--red)';
+  const fl = (flags || '').trim();
+  const title = fl ? 'flags: ' + fl.replace(/,/g, ', ') : 'no quality flags';
+  return `<span class="badge" title="${title}" style="background:${color}22;color:${color};border:1px solid ${color}55;cursor:help">${score}${fl ? ' ⚠' : ''}</span>`;
+}
+
 async function loadDealers() {
   const dealers = await (await fetch('/api/dealerships')).json();
   const tbody = document.getElementById('dealer-tbody');
 
   const counts = {};
-  dealers.forEach(d => { const s = d.scrape_status || 'pending'; counts[s] = (counts[s]||0)+1; });
-  const order = ['ok','blocked','empty','unsupported','unreachable','pending'];
+  dealers.forEach(d => { const s = d.canonical_dealer_id != null ? 'duplicate' : (d.scrape_status || 'pending'); counts[s] = (counts[s]||0)+1; });
+  const order = ['ok','blocked','empty','unsupported','unreachable','duplicate','pending'];
   document.getElementById('dealer-summary').innerHTML =
     order.filter(s => counts[s]).map(s => {
       const color = STATUS_COLORS[s] || 'var(--muted)';
@@ -835,19 +928,23 @@ async function loadDealers() {
     }).join('');
 
   if (!dealers.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:30px">No dealers yet. Use <strong>Find New Dealers</strong>.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:30px">No dealers yet. Use <strong>Find New Dealers</strong>.</td></tr>';
     return;
   }
   dealers.sort((a,b) => (b.active_listings||0) - (a.active_listings||0) || (a.name||'').localeCompare(b.name||''));
-  tbody.innerHTML = dealers.map(d => `
-    <tr>
+  const dupBadge = '<span class="badge" title="Serves the same inventory feed as another rooftop (same VINs under a different domain). Its cars are counted under the canonical dealer; skipped by scans/quality." style="background:var(--muted)22;color:var(--muted);border:1px solid var(--muted)55;cursor:help">duplicate feed</span>';
+  tbody.innerHTML = dealers.map(d => {
+    const dup = d.canonical_dealer_id != null;
+    return `
+    <tr${dup ? ' style="opacity:.5"' : ''}>
       <td>${d.name}${d.distance_mi != null ? ` <span style="color:var(--muted);font-size:.78rem">· ${d.distance_mi.toFixed(0)}mi</span>` : ''}</td>
       <td>${d.city || ''}, ${d.state || ''}</td>
       <td style="color:var(--muted)">${d.platform || '—'}</td>
-      <td>${statusBadge(d.scrape_status, d.scrape_note)}</td>
+      <td>${dup ? dupBadge : statusBadge(d.scrape_status, d.scrape_note)}</td>
+      <td title="Data-quality score (0-100) of this dealer's active listings. Hover a flagged badge for the issues.">${dup ? '<span style="color:var(--muted)">—</span>' : qualityBadge(d.quality_score, d.quality_flags)}</td>
       <td style="font-weight:700" title="Cars currently in our database for this dealer (from the last Scan Inventory). Classify alone does not load cars.">${d.active_listings != null ? d.active_listings : 0}</td>
       <td>${d.website ? `<a href="${d.website}" target="_blank" style="color:var(--accent)">Visit ↗</a>` : '—'}</td>
-    </tr>`).join('');
+    </tr>`; }).join('');
 }
 
 // ── Toast ─────────────────────────────────────────────────────

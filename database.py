@@ -194,6 +194,10 @@ def init_db():
         ("scrape_at",         "TEXT"),    # timestamp of last attempt
         ("directory_id",      "INTEGER"), # link to tx_directory row
         ("last_inventory_at", "TEXT"),    # last time inventory was scanned
+        ("quality_score",     "REAL"),    # Phase 5: 0-100 data-quality of active listings
+        ("quality_flags",     "TEXT"),    # Phase 5: comma-list of triggered flags
+        ("quality_at",        "TEXT"),    # Phase 5: when quality was last computed
+        ("canonical_dealer_id","INTEGER"),# Phase 4.1: set ⇒ this row duplicates that dealer's inventory feed (skip it)
     ]:
         if col not in existing_cols:
             c.execute(f"ALTER TABLE dealerships ADD COLUMN {col} {ddl}")

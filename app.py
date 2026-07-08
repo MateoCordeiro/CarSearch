@@ -48,17 +48,17 @@ def api_listings():
     filters  = {k: v for k, v in filters.items() if v is not None}
     listings = get_listings(filters)
 
+    # duplicate_count for the "Listed on N sites" badge. ONE grouped query for
+    # all active groups, then mapped in Python — was an N+1 (a COUNT(*) per
+    # listing = thousands of round-trips and the main cause of slow loads).
     conn = get_conn()
-    for l in listings:
-        if l.get("duplicate_group_id"):
-            cnt = conn.execute(
-                "SELECT COUNT(*) FROM listings WHERE duplicate_group_id=? AND is_active=1",
-                (l["duplicate_group_id"],)
-            ).fetchone()[0]
-            l["duplicate_count"] = cnt
-        else:
-            l["duplicate_count"] = 1
+    counts = dict(conn.execute(
+        "SELECT duplicate_group_id, COUNT(*) FROM listings "
+        "WHERE is_active=1 AND duplicate_group_id IS NOT NULL "
+        "GROUP BY duplicate_group_id").fetchall())
     conn.close()
+    for l in listings:
+        l["duplicate_count"] = counts.get(l.get("duplicate_group_id"), 1)
     return jsonify(listings)
 
 
@@ -289,6 +289,23 @@ def api_dealer_lists():
     return jsonify({"can_scrape": can, "cannot_scrape": cannot})
 
 
+@app.route("/api/dealers/quality", methods=["POST"])
+def api_dealers_quality():
+    """Phase 5: recompute per-dealer data-quality on demand (no scrape) and
+    persist scores/flags. Returns {scored, flagged}."""
+    import dealer_ops
+    return jsonify(dealer_ops.flag_quality())
+
+
+@app.route("/api/dealers/dedupe", methods=["POST"])
+def api_dealers_dedupe():
+    """Phase 4.1: collapse dealer rows that serve the same inventory feed under
+    different rooftop domains (VIN-overlap based). ?dry=1 for a dry run."""
+    import dealer_ops
+    dry = request.args.get("dry") in ("1", "true", "yes")
+    return jsonify(dealer_ops.dedupe_dealers_by_inventory(apply=not dry))
+
+
 @app.route("/api/scan-log")
 def api_scan_log():
     limit = _int(request.args.get("limit")) or 200
@@ -323,8 +340,19 @@ if __name__ == "__main__":
             dealer_ops.scan_inventory(radius_mi=cfg.LOCATION["radius"])
             run_deduplication()
         scheduler.add_job(_scheduled_refresh, "interval", hours=cfg.AUTO_REFRESH_HOURS)
+
+        def _scheduled_reclassify():
+            # Daily: re-classify dealers in radius (resume=True skips any done in
+            # the last 12h) so transiently 'unreachable'/'blocked' dealers — e.g. a
+            # site that was 503/WAF-blocked at scan time — automatically recover to
+            # 'ok' and get picked up by the next scan, with no manual re-run.
+            import importlib; importlib.reload(cfg)
+            dealer_ops.classify_dealers(scope="radius", zip_code=cfg.LOCATION["zip"],
+                                        radius_mi=cfg.LOCATION["radius"], resume=True)
+        scheduler.add_job(_scheduled_reclassify, "interval", hours=24)
+
         scheduler.start()
-        print(f"[OK] Auto-refresh of classified dealers every {cfg.AUTO_REFRESH_HOURS}h")
+        print(f"[OK] Auto-refresh every {cfg.AUTO_REFRESH_HOURS}h; re-classify every 24h")
 
     print("✓ Car Search running at http://localhost:5000")
     app.run(debug=True, use_reloader=False)

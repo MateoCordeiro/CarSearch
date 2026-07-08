@@ -5,6 +5,10 @@ Every scraper must implement: search(config) -> list[dict]
 
 import time
 import random
+import os
+import re
+import json
+import hashlib
 from abc import ABC, abstractmethod
 
 # curl_cffi impersonates a real Chrome TLS fingerprint — plain `requests`
@@ -24,6 +28,18 @@ MIN_SANE_PRICE = 500
 MAX_SANE_PRICE = 10_000_000
 
 
+class _CachedResp:
+    """Minimal stand-in for a curl_cffi Response served from the disk cache —
+    exposes just what the scrapers use (.text / .status_code / .url / .json())."""
+    def __init__(self, text, status_code, url):
+        self.text = text
+        self.status_code = status_code
+        self.url = url
+
+    def json(self):
+        return json.loads(self.text)
+
+
 class BaseScraper(ABC):
     name = "base"
 
@@ -32,16 +48,74 @@ class BaseScraper(ABC):
     delay_range = (1.5, 3.5)
     timeout = 15
 
+    # ── Optional on-disk HTTP cache (opt-in; default OFF so live scans stay
+    # fresh). Turn on (cache_enabled=True) for VDP enrichment, fixture capture,
+    # and dev re-runs so we don't refetch the same pages or hammer dealer sites.
+    cache_enabled = False
+    cache_ttl     = 86_400                                   # seconds
+    cache_dir     = os.path.join("data", "http_cache")
+    # When set to a directory, raw HTML of fetched pages is dumped there — used
+    # to debug 'unsupported'/'blocked' dealers and to build test fixtures.
+    debug_save_dir = None
+
     def __init__(self):
         self.session = requests.Session(impersonate="chrome")
         self.session.headers.update(HEADERS)
 
+    # ── Disk cache helpers ────────────────────────────────────────
+    def _cache_key(self, url, params):
+        raw = url + ("?" + json.dumps(params, sort_keys=True) if params else "")
+        return hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()
+
+    def _cache_load(self, url, params):
+        if not self.cache_enabled:
+            return None
+        path = os.path.join(self.cache_dir, self._cache_key(url, params) + ".json")
+        try:
+            if time.time() - os.path.getmtime(path) > self.cache_ttl:
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            return _CachedResp(d["text"], d["status_code"], d.get("url", url))
+        except Exception:
+            return None
+
+    def _cache_store(self, url, params, resp):
+        if not self.cache_enabled or resp is None:
+            return
+        try:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            path = os.path.join(self.cache_dir, self._cache_key(url, params) + ".json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"text": resp.text, "status_code": resp.status_code,
+                           "url": getattr(resp, "url", url)}, f)
+        except Exception:
+            pass
+
+    def _save_debug(self, label, text):
+        """Dump raw HTML for later inspection / fixtures (no-op unless
+        debug_save_dir is set)."""
+        if not self.debug_save_dir or not text:
+            return
+        try:
+            os.makedirs(self.debug_save_dir, exist_ok=True)
+            safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", label)[:120] or "page"
+            with open(os.path.join(self.debug_save_dir, safe + ".html"),
+                      "w", encoding="utf-8") as f:
+                f.write(text)
+        except Exception:
+            pass
+
     def _get(self, url, params=None, **kwargs):
         """Polite GET with random delay to avoid getting blocked."""
+        cached = self._cache_load(url, params)
+        if cached is not None:
+            return cached if cached.status_code < 400 else None
         time.sleep(random.uniform(*self.delay_range))
         try:
             r = self.session.get(url, params=params, timeout=self.timeout, **kwargs)
             r.raise_for_status()
+            self._cache_store(url, params, r)
             return r
         except Exception as e:
             print(f"[{self.name}] Request failed: {e}")
@@ -51,12 +125,18 @@ class BaseScraper(ABC):
         """GET that returns the response WITHOUT raising on 4xx/5xx, so callers
         can inspect the status code (needed for per-dealer diagnostics).
         Returns the response, or None on a connection-level error."""
+        cached = self._cache_load(url, params)
+        if cached is not None:
+            return cached
         time.sleep(random.uniform(*self.delay_range))
         try:
-            return self.session.get(url, params=params, timeout=self.timeout, **kwargs)
+            r = self.session.get(url, params=params, timeout=self.timeout, **kwargs)
         except Exception as e:
             print(f"[{self.name}] Request error: {e}")
             return None
+        if r is not None and r.status_code == 200:
+            self._cache_store(url, params, r)
+        return r
 
     # Status codes worth retrying — transient throttling / gateway hiccups.
     _RETRY_CODES = (429, 500, 502, 503, 504)
@@ -70,6 +150,9 @@ class BaseScraper(ABC):
         truncate a dealer's inventory (the old `if not resp: break` did exactly
         that). On a clean 4xx (e.g. real 404 past the last page) it returns
         immediately so the caller can stop normally."""
+        cached = self._cache_load(url, params)
+        if cached is not None:
+            return cached
         for attempt in range(retries + 1):
             time.sleep(random.uniform(*self.delay_range))
             try:
@@ -83,8 +166,47 @@ class BaseScraper(ABC):
             if r.status_code in self._RETRY_CODES and attempt < retries:
                 time.sleep(2.0 * (attempt + 1))
                 continue
+            if r.status_code == 200:
+                self._cache_store(url, params, r)
             return r
         return None
+
+    def _get_many(self, urls, workers=5):
+        """Fetch many URLs concurrently with a small bounded thread pool; returns
+        {url: response-or-None}. Each worker uses its OWN curl_cffi session
+        (sessions aren't thread-safe). The disk cache is honored (cache hits skip
+        the network and the delay). Keep `workers` modest/browser-like — these are
+        often all ONE dealer's host, so this is the per-host politeness cap, not a
+        license to flood. Used for the per-vehicle (VDP) fetch passes, which are
+        otherwise the dominant cost (e.g. ~700 sequential VDP fetches ≈ 30 min)."""
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        if not urls:
+            return {}
+        local = threading.local()
+
+        def _one(u):
+            cached = self._cache_load(u, None)
+            if cached is not None:
+                return u, cached
+            sess = getattr(local, "sess", None)
+            if sess is None:
+                sess = local.sess = requests.Session(impersonate="chrome")
+                sess.headers.update(HEADERS)
+            time.sleep(random.uniform(*self.delay_range))
+            try:
+                r = sess.get(u, timeout=self.timeout)
+            except Exception:
+                return u, None
+            if r is not None and r.status_code == 200:
+                self._cache_store(u, None, r)
+            return u, r
+
+        out = {}
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+            for u, r in ex.map(_one, list(urls)):
+                out[u] = r
+        return out
 
     def _post_retry(self, url, json=None, headers=None, retries=2, **kwargs):
         """POST with the same transient-failure retry policy as `_get_retry`.

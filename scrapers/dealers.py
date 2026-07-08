@@ -14,6 +14,7 @@ cardealerdb.com URL structure:
 import re
 import json
 import time
+from html import unescape as html_unescape
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from geopy.geocoders import Nominatim
@@ -282,6 +283,12 @@ class DealerScraper(BaseScraper):
     # Inventory pages embed full vehicle JSON in DDC.WS.state['ws-inv-data'].
     DDC_PATHS = ["/used-inventory/index.htm", "/new-inventory/index.htm"]
     MAX_PAGES_PER_DEALER = 30
+    # Sitemap→VDP fallback budget. Full scans want everything; classify only
+    # needs to confirm scrapability, so it sets a generous attempt budget but a
+    # small stop_after (early-exit once a few VDPs parse) — fast yet robust to the
+    # first few sitemap URLs failing to parse.
+    sitemap_max_vdps  = 120     # max VDP pages to fetch
+    sitemap_stop_after = None   # stop once this many vehicles are collected
 
     # The BeautifulSoup/soupsieve HTML-card fallback parser can trigger a FATAL,
     # uncatchable CPython 3.14 crash (soupsieve css_match "Executing a cache") that
@@ -370,46 +377,28 @@ class DealerScraper(BaseScraper):
             if bigger and bigger.status_code == 200 and len(bigger.text) > len(gen_html):
                 gen_html, gen_url = bigger.text, base + path + f"{sep}limit=1000"
 
-            # Run the structured (regex-based) extractors and keep the richest
-            # result by total data captured.
-            best, best_how, best_score = None, None, -1
-            for label, fn in [
-                ("next-data",       lambda: self._extract_nextdata_inventory(gen_html, gen_url, dealer)),
-                ("inline-JSON",     lambda: self._extract_inline_vehicle_json(gen_html, gen_url, dealer)),
-                ("vehicleDetails",  lambda: self._extract_vehicledetails_inventory(gen_html, gen_url, dealer)),
-                ("JSON-LD",         lambda: self._extract_jsonld_inventory(gen_html, gen_url, dealer)),
-                ("embedded",        lambda: self._extract_json_inventory(gen_html, dealer)),
-            ]:
-                got = fn() or []
-                if got:
-                    score = self._completeness_score(got)
-                    if score > best_score:
-                        best, best_how, best_score = got, label, score
-
-            # HTML card parser is the LAST resort: it parses the whole page with
-            # BeautifulSoup/soupsieve, which is slow and — on Python 3.14 — can
-            # fatally crash on multi-MB pages. Only use it when structured
-            # extraction came up short, and never on very large pages.
-            if (self.ENABLE_HTML_FALLBACK and (not best or len(best) < 3)
-                    and len(gen_html) < 800_000):
-                got = self._parse_html_inventory(gen_html, gen_url, dealer)
-                if got:
-                    score = self._completeness_score(got)
-                    if score > best_score:
-                        best, best_how, best_score = got, "HTML", score
-
+            best, best_how = self._parse_generic_srp(gen_html, gen_url, dealer)
             if best:
-                # Backfill mileage/vin/price the winning extractor missed but the
-                # HTML cards still carry (e.g. carsforsale.com JSON-LD has no mileage).
-                self._enrich_listings(best, gen_html, gen_url)
                 return best, "generic", "ok", f"{len(best)} vehicles via generic parser ({best_how})"
 
-        # ── Fallback: the SRP loaded but inventory is JS-rendered with no
-        #    embedded data. Many such sites still expose per-vehicle pages via a
-        #    sitemap, and those VDPs usually carry JSON-LD / Next.js data. Only
-        #    attempt this when the domain actually responded (reached), so dead
-        #    domains aren't slowed down chasing sitemaps that won't exist.
-        if reached:
+        # ── Fallback 1: the domain is alive but its inventory page isn't on a
+        #    standard LANDING_PATHS url (the "404 / non-standard URL" case).
+        #    Discover the real inventory link from the homepage nav and parse it.
+        if not reached and seen_status:
+            for disc_url in self._discover_inventory_urls(base):
+                resp = self._get_raw(disc_url)
+                if resp and resp.status_code == 200 and len(resp.text) > 2000:
+                    reached = True
+                    best, best_how = self._parse_generic_srp(resp.text, disc_url, dealer)
+                    if best:
+                        return best, "generic", "ok", \
+                            f"{len(best)} vehicles via discovered SRP ({best_how})"
+
+        # ── Fallback 2: sitemap → VDP parse. Many sites with no embedded SRP data
+        #    still publish a full vehicle sitemap. Run whenever the domain
+        #    responded at all (even if every standard path 404'd) — not only when
+        #    an SRP loaded — but skip truly dead domains (no response, no codes).
+        if reached or seen_status:
             sm = self._scrape_via_sitemap(base, dealer)
             if sm:
                 return sm, "sitemap", "ok", f"{len(sm)} vehicles via sitemap + VDP parse"
@@ -1067,16 +1056,33 @@ class DealerScraper(BaseScraper):
             ))
         return results
 
+    # Vehicle-signal fields that distinguish a car from any other schema.org
+    # Product (a dentist's site can carry a Product node — don't treat it as a car).
+    _VEH_SIGNAL_KEYS = ("vehicleIdentificationNumber", "vin", "mileageFromOdometer",
+                        "vehicleModelDate", "vehicleTransmission", "vehicleEngine",
+                        "bodyType", "driveWheelConfiguration")
+
+    def _is_car_node(self, o):
+        if any(o.get(k) for k in self._VEH_SIGNAL_KEYS):
+            return True
+        brand = o.get("brand") or o.get("manufacturer")
+        bname = brand.get("name") if isinstance(brand, dict) else brand
+        return str(bname or "").strip().lower() in self._KNOWN_MAKES
+
     def _collect_jsonld_vehicles(self, html):
-        """Return every schema.org Vehicle/Car/Product node found in <script
-        type=application/ld+json> blocks (handles @graph and nested arrays)."""
+        """Return every schema.org Vehicle/Car node, plus Product/IndividualProduct
+        nodes that actually look like a vehicle (a VIN, a vehicle-only field, or a
+        known car make). Without the Product guard, non-dealer sites with a generic
+        Product schema (e.g. a dentist) get mis-parsed as a 1-car 'dealer'."""
         nodes = []
 
         def walk(o):
             if isinstance(o, dict):
                 t = o.get("@type", "")
                 types = t if isinstance(t, list) else [t]
-                if any(x in ("Vehicle", "Car", "Product", "IndividualProduct") for x in types):
+                if any(x in ("Vehicle", "Car") for x in types):
+                    nodes.append(o)
+                elif any(x in ("Product", "IndividualProduct") for x in types) and self._is_car_node(o):
                     nodes.append(o)
                 for val in o.values():
                     walk(val)
@@ -1267,6 +1273,19 @@ class DealerScraper(BaseScraper):
     # carries year-make-model, so parse it as a fallback.
     _MULTIWORD_MAKES = {"land rover", "alfa romeo", "aston martin", "mercedes benz",
                         "rolls royce"}
+    # Known passenger-vehicle makes — used to tell a real car listing from a
+    # generic schema.org Product on a non-dealer site.
+    _KNOWN_MAKES = {
+        "acura", "alfa romeo", "aston martin", "audi", "bentley", "bmw", "buick",
+        "cadillac", "chevrolet", "chevy", "chrysler", "dodge", "ferrari", "fiat",
+        "ford", "genesis", "gmc", "honda", "hummer", "hyundai", "infiniti",
+        "jaguar", "jeep", "kia", "lamborghini", "land rover", "lexus", "lincoln",
+        "lotus", "lucid", "maserati", "maybach", "mazda", "mclaren", "mercedes-benz",
+        "mercedes benz", "mercedes", "mercury", "mini", "mitsubishi", "nissan",
+        "oldsmobile", "polestar", "pontiac", "porsche", "ram", "rivian",
+        "rolls-royce", "rolls royce", "saab", "saturn", "scion", "smart", "subaru",
+        "suzuki", "tesla", "toyota", "volkswagen", "vw", "volvo",
+    }
     _DRIVETRAIN = {"awd", "fwd", "rwd", "4wd", "2wd", "4x4", "4x2"}
     _BODY_SUFFIXES = ("sport utility", "4dr car", "2dr car", "3dr car", "5dr car",
                       "4dr suv", "crew cab", "extended cab", "quad cab", "mega cab",
@@ -1359,6 +1378,100 @@ class DealerScraper(BaseScraper):
             for fld in ("mileage", "vin", "price"):
                 if l.get(fld) in (None, "", 0) and src.get(fld):
                     l[fld] = src[fld]
+
+    # Fields worth recovering from a VDP when the SRP omitted them. Price and VIN
+    # are deliberately excluded: VDP price widgets are unreliable (e.g. a flat
+    # "$15,000" finance example) and the SRP's VIN is already trustworthy.
+    _VDP_ENRICH_FIELDS = ("mileage", "trim", "exterior_color", "transmission")
+
+    def enrich_via_vdp(self, listings, cap=400, workers=5, progress_cb=None):
+        """Backfill missing mileage/trim/color/transmission by fetching each
+        listing's own VDP and parsing it. Mutates the listing dicts in place;
+        returns how many were enriched. VDPs are fetched CONCURRENTLY (bounded
+        pool — this is the per-car fetch pass that's otherwise the dominant cost)
+        and through the HTTP cache, so retries/re-runs don't refetch. Only
+        genuinely-missing fields are filled — existing values are untouched."""
+        todo = [l for l in listings
+                if l.get("url") and "#" not in l["url"]
+                and any(l.get(f) in (None, "", 0) for f in self._VDP_ENRICH_FIELDS)]
+        todo = todo[:cap]
+        resps = self._get_many([l["url"] for l in todo], workers=workers)
+        enriched = 0
+        for i, l in enumerate(todo, 1):
+            r = resps.get(l["url"])
+            if not r or r.status_code != 200:
+                continue
+            got = (self._extract_jsonld_inventory(r.text, l["url"], {})
+                   or self._extract_inline_vehicle_json(r.text, l["url"], {})
+                   or self._extract_nextdata_inventory(r.text, l["url"], {}))
+            src = got[0] if got else {}
+            seg = self._fields_from_segment(r.text)   # mileage via regex
+            changed = False
+            for f in self._VDP_ENRICH_FIELDS:
+                if l.get(f) in (None, "", 0):
+                    val = src.get(f) or (seg.get(f) if f == "mileage" else None)
+                    if val:
+                        l[f] = val
+                        changed = True
+            enriched += changed
+            if progress_cb and i % 25 == 0:
+                progress_cb(i, len(todo))
+        return enriched
+
+    def _parse_generic_srp(self, html, url, dealer):
+        """Run the structured generic extractors on one SRP, keep the richest by
+        data captured, backfill from the HTML/url, and return (listings, how).
+        Shared by the standard landing-path flow and homepage-discovered SRPs."""
+        best, best_how, best_score = None, None, -1
+        for label, fn in [
+            ("next-data",      lambda: self._extract_nextdata_inventory(html, url, dealer)),
+            ("inline-JSON",    lambda: self._extract_inline_vehicle_json(html, url, dealer)),
+            ("vehicleDetails", lambda: self._extract_vehicledetails_inventory(html, url, dealer)),
+            ("JSON-LD",        lambda: self._extract_jsonld_inventory(html, url, dealer)),
+            ("embedded",       lambda: self._extract_json_inventory(html, dealer)),
+        ]:
+            got = fn() or []
+            if got:
+                score = self._completeness_score(got)
+                if score > best_score:
+                    best, best_how, best_score = got, label, score
+
+        # Last-resort HTML card parser (BeautifulSoup/soupsieve) — gated off by
+        # default on Py 3.14 (fatal crash); see ENABLE_HTML_FALLBACK.
+        if (self.ENABLE_HTML_FALLBACK and (not best or len(best) < 3)
+                and len(html) < 2_500_000):
+            got = self._parse_html_inventory(html, url, dealer)
+            if got and self._completeness_score(got) > best_score:
+                best, best_how = got, "HTML"
+
+        if best:
+            # Backfill mileage/vin/price/ymm the winner missed but the HTML/url
+            # still carry (e.g. carsforsale.com JSON-LD has no mileage).
+            self._enrich_listings(best, html, url)
+        return best, best_how
+
+    # Homepage links that point at an inventory/search results page.
+    _INV_LINK_RE = re.compile(
+        r'href="([^"]*(?:used-inventory|used-vehicles|pre-?owned|used-cars|'
+        r'inventory|/vehicles|cars-for-sale|vehicle-search|/srp)[^"#?]*)"', re.I)
+
+    def _discover_inventory_urls(self, base):
+        """When the standard LANDING_PATHS all 404, find the dealer's real
+        inventory URL by reading the homepage nav. Returns absolute candidate
+        URLs (deduped, capped)."""
+        resp = self._get_raw(base + "/")
+        if not resp or resp.status_code != 200:
+            return []
+        out, seen = [], set()
+        for m in self._INV_LINK_RE.finditer(resp.text):
+            u = urljoin(base + "/", m.group(1).split("#")[0])
+            key = u.rstrip("/").lower()
+            if key and key != base.rstrip("/").lower() and key not in seen:
+                seen.add(key)
+                out.append(u)
+        # prefer the most specific (used-inventory) first
+        out.sort(key=lambda u: (("used" not in u.lower()), len(u)))
+        return out[:6]
 
     def _parse_html_inventory(self, html, base_url, dealer) -> list:
         soup    = BeautifulSoup(html, "html.parser")
@@ -1484,8 +1597,19 @@ class DealerScraper(BaseScraper):
     # not. Pull VDP URLs from the sitemap(s), then parse each page.
 
     _VDP_URL_RE = re.compile(r"/(vehicle|vehicle-details|vdp|inventory|used|new|cars?|vin)[-/]", re.I)
+    # Pages that match _VDP_URL_RE but are NOT individual vehicles — category/SRP
+    # landing pages and dealer service/info pages. Excluding these stops the
+    # sitemap budget being wasted on e.g. /used-cars-for-sale-austin-tx or
+    # /new-tires (which carry no vehicle data) before reaching real VDPs.
+    _VDP_NEG_RE = re.compile(
+        r"(for-sale|-for-sale|/service|/parts|special|/finance|/about|/contact"
+        r"|/blog|/research|/review|tire|/staff|/hours|/direction|/career|/privacy"
+        r"|/oil|/brake|/coupon|/accessor|/trade|/sell|/lease-deals|/test-drive"
+        r"|/used-?inventory/?$|/new-?inventory/?$|/inventory/?$|/used-?cars?/?$"
+        r"|/new-?cars?/?$|/used-?trucks?|/new-?trucks?|/used-?suvs?)", re.I)
 
-    def _scrape_via_sitemap(self, base, dealer, max_vdps=120) -> list:
+    def _scrape_via_sitemap(self, base, dealer, max_vdps=None) -> list:
+        max_vdps = max_vdps or self.sitemap_max_vdps
         vdp_urls = self._sitemap_vdp_urls(base)
         if not vdp_urls:
             return []
@@ -1512,6 +1636,10 @@ class DealerScraper(BaseScraper):
                 if key and key not in seen:
                     seen.add(key)
                     results.append(l)
+            # classify only needs to confirm scrapability — stop early once a few
+            # VDPs have parsed, but keep probing if the first ones failed.
+            if self.sitemap_stop_after and len(results) >= self.sitemap_stop_after:
+                break
         return results
 
     def _sitemap_vdp_urls(self, base) -> list:
@@ -1535,13 +1663,18 @@ class DealerScraper(BaseScraper):
             resp = self._get_raw(sm)
             if not resp or resp.status_code != 200 or "<" not in resp.text:
                 continue
-            found = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", resp.text, re.I)
+            # sitemap <loc> URLs are often HTML-entity-encoded (e.g. &#x2B; for
+            # '+'); decode them or every fetch 404s.
+            found = [html_unescape(u) for u in
+                     re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", resp.text, re.I)]
             if "<sitemapindex" in resp.text.lower():
                 queue += [u for u in found if u.lower().endswith(".xml")]
             else:
                 locs += found
 
-        return list(dict.fromkeys(u for u in locs if self._VDP_URL_RE.search(u)))
+        return list(dict.fromkeys(
+            u for u in locs
+            if self._VDP_URL_RE.search(u) and not self._VDP_NEG_RE.search(u)))
 
     # ── Helpers ───────────────────────────────────────────────
 

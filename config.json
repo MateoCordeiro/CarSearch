@@ -10,7 +10,7 @@
     },
     "location": {
         "zip": "78664",
-        "radius": 10
+        "radius": 15
     },
     "sources": {
         "autotrader": false,
