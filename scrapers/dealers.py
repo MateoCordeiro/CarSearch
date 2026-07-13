@@ -825,8 +825,11 @@ class DealerScraper(BaseScraper):
                 return fm.group(1) if fm else None
 
             title = field("title") or ""
-            price = _bounded_int(field("sellingPrice") or field("yourPrice")
-                                 or field("msrp"), 100, 10_000_000)
+            # MSRP is NOT an asking price — never fall back to it. A unit with
+            # only an MSRP is stored price-less (msrp goes in its own column).
+            price = _bounded_int(field("sellingPrice") or field("yourPrice"),
+                                 100, 10_000_000)
+            msrp  = _bounded_int(field("msrp"), 100, 10_000_000)
 
             year = make = model = trim = None
             tp = title.split()
@@ -850,6 +853,7 @@ class DealerScraper(BaseScraper):
                 model          = model,
                 trim           = trim,
                 price          = price,
+                msrp           = msrp,
                 city           = dealer.get("city"),
                 state          = dealer.get("state"),
                 zip            = dealer.get("zip"),

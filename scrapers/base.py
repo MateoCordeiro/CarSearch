@@ -298,6 +298,15 @@ class BaseScraper(ABC):
 
     def _listing(self, **kwargs) -> dict:
         """Helper to build a consistently shaped listing dict."""
+        price = self._sane_price(kwargs.get("price"))
+        msrp  = self._sane_price(kwargs.get("msrp"))
+        raw   = kwargs.get("raw", {})
+        # A "price" under 25% of MSRP is a leaked payment/fee, not a real 75%+
+        # discount — drop it to None but keep it in raw for the debug trail.
+        if price and msrp and price < 0.25 * msrp:
+            if isinstance(raw, dict):
+                raw["rejected_price"] = price
+            price = None
         return {
             "source":        self.name,
             "source_id":     kwargs.get("source_id"),
@@ -310,13 +319,13 @@ class BaseScraper(ABC):
             "exterior_color":kwargs.get("exterior_color"),
             "transmission":  kwargs.get("transmission"),
             "mileage":       kwargs.get("mileage"),
-            "price":         self._sane_price(kwargs.get("price")),
-            "msrp":          kwargs.get("msrp"),
+            "price":         price,
+            "msrp":          msrp,
             "city":          kwargs.get("city"),
             "state":         kwargs.get("state"),
             "zip":           kwargs.get("zip"),
             "distance_mi":   kwargs.get("distance_mi"),
             "image_url":     kwargs.get("image_url"),
             "image_urls":    kwargs.get("image_urls", []),
-            "raw":           kwargs.get("raw", {}),
+            "raw":           raw,
         }

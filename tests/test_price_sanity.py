@@ -136,6 +136,36 @@ def test_jsonld_lease_offer_rejected():
     assert S._jsonld_to_fields(plain).get("price") == 17495
 
 
+# ── _listing: MSRP sanity + price-vs-MSRP plausibility guard ──
+def test_listing_msrp_guard():
+    # payment-sized "price" against a real MSRP → price dropped, kept in raw
+    l = S._listing(url="u", price=599, msrp=32000)
+    assert l["price"] is None and l["msrp"] == 32000
+    assert l["raw"]["rejected_price"] == 599
+    # a plausible discount is untouched
+    l = S._listing(url="u", price=28500, msrp=32000)
+    assert l["price"] == 28500 and "rejected_price" not in l["raw"]
+    # msrp now range-checked like price ($0/garbage placeholders dropped)
+    assert S._listing(url="u", msrp=0)["msrp"] is None
+    assert S._listing(url="u", msrp="junk")["msrp"] is None
+    # no msrp → cheap-but-real price survives
+    assert S._listing(url="u", price=800)["price"] == 800
+
+
+# ── vehicleDetails: msrp-only unit stored price-less, msrp captured ──
+def test_vehicledetails_msrp_not_price():
+    html = '''
+    <a onclick='vehicleDetails($event, "3MZBPABL9PM100001", "/viewdetails/new/3MZBPABL9PM100001/2023-mazda-mazda3-sedan", {msrp:"25715",type:"New",title:"2023 Mazda Mazda3 Sedan"})'>
+    <a onclick='vehicleDetails($event, "JM3KFBDM1P0200002", "/viewdetails/used/JM3KFBDM1P0200002/2023-mazda-cx-5-suv", {msrp:"31500",sellingPrice:"28995",type:"Used",title:"2023 Mazda CX-5"})'>
+    '''
+    ls = S._extract_vehicledetails_inventory(html, "https://example.com/inventory", {})
+    by_vin = {l["vin"]: l for l in ls}
+    assert by_vin["3MZBPABL9PM100001"]["price"] is None
+    assert by_vin["3MZBPABL9PM100001"]["msrp"] == 25715
+    assert by_vin["JM3KFBDM1P0200002"]["price"] == 28995
+    assert by_vin["JM3KFBDM1P0200002"]["msrp"] == 31500
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items())
            if n.startswith("test_") and callable(f)]
