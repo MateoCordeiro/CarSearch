@@ -520,6 +520,19 @@ def scan_inventory(zip_code=None, radius_mi=None, only_ok=True, platforms=None,
     log_event(run_id, "inventory", "summary",
               detail=f"Inventory scan: +{tot_new} new, -{tot_sold} sold, {tot_upd} updated across {len(dealers)} dealers")
 
+    # Collapse dealer rows serving the same inventory feed under different
+    # rooftop domains (VIN-overlap based) after every scan — cheap (one indexed
+    # VIN query per dealer + in-memory Jaccard), idempotent, and it runs before
+    # the app's listing dedup so that pass sees already-thinned inventory.
+    # Guarded: a dedupe bug must never fail the scan that produced the data.
+    if len(dealers) > 1:
+        try:
+            dd = dedupe_dealers_by_inventory(apply=True, run_id=run_id)
+            if dd.get("duplicates_collapsed"):
+                cb(f"Dealer dedupe: collapsed {dd['duplicates_collapsed']} duplicate dealer rows.", 100)
+        except Exception as e:
+            log_event(run_id, "dedupe", "info", detail=f"dealer dedupe failed: {e}")
+
     # Phase 5 — self-catching quality: recompute per-dealer data-quality after
     # every scan so thin sites / regressions are flagged automatically. Guarded:
     # a quality bug must never fail the scan that produced the data.
