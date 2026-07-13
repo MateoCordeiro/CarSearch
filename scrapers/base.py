@@ -259,6 +259,43 @@ class BaseScraper(ABC):
             return None
         return price if MIN_SANE_PRICE <= price <= MAX_SANE_PRICE else None
 
+    # Payment/lease context around a dollar amount in free text. Both regexes
+    # are applied ANCHORED at the amount's boundaries — the suffix must start
+    # immediately after it ("$299/mo", "$1,500 down") and the prefix must end
+    # immediately before it ("lease for $4,999") — so a "Leasing" link elsewhere
+    # on the page can never poison a legitimate "$2,500" price.
+    _PAY_AFTER_RE = re.compile(r"""
+        ^[\s*†]*(?:
+            /\s*(?:mo|mos|month|wk|week)\b
+          | per\s+(?:month|week)\b
+          | a\s+month\b
+          | monthly\b
+          | bi-?weekly\b
+          | down\b
+          | due\s+at\s+(?:signing|delivery)\b
+          | apr\b
+          | deposit\b
+        )""", re.I | re.X)
+    _PAY_BEFORE_RE = re.compile(r"""
+        (?:
+            leas(?:e|ing)(?:\s+(?:for|from|at|special))?
+          | payments?\s+(?:of|from|as\s+low\s+as|starting\s+at)?
+          | est(?:\.|imated)?\s*payments?
+          | finance\s+(?:for|from)
+          | as\s+low\s+as
+          | down\s+payment(?:\s+of)?
+          | money\s+down
+          | drive\s+(?:home|away)\s+for
+        )\s*:?\s*(?:only\s+|just\s+)?$""", re.I | re.X)
+
+    @classmethod
+    def _is_payment_context(cls, text, start, end, before=48, after=24):
+        """True when the dollar amount at text[start:end] reads as a monthly/
+        weekly payment, money-down, or lease figure rather than an asking price."""
+        if cls._PAY_AFTER_RE.match(text[end:end + after]):
+            return True
+        return bool(cls._PAY_BEFORE_RE.search(text[max(0, start - before):start]))
+
     def _listing(self, **kwargs) -> dict:
         """Helper to build a consistently shaped listing dict."""
         return {

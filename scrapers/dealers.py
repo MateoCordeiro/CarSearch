@@ -465,7 +465,7 @@ class DealerScraper(BaseScraper):
                         model          = v.get("model"),
                         trim           = v.get("trim"),
                         mileage        = v.get("mileage") or v.get("miles"),
-                        price          = v.get("price") or v.get("internetPrice") or v.get("sellingPrice"),
+                        price          = self._pick_price(v, ("price", "internetPrice", "sellingPrice")),
                         exterior_color = v.get("exteriorColor") or v.get("color"),
                         city           = dealer.get("city"),
                         state          = dealer.get("state"),
@@ -520,9 +520,7 @@ class DealerScraper(BaseScraper):
                 continue
             seen.add(key)
 
-            price = next((_bounded_int(v.get(k), 100, 10_000_000)
-                          for k in self._NEXT_PRICE_KEYS
-                          if _bounded_int(v.get(k), 100, 10_000_000)), None)
+            price = self._pick_price(v, self._NEXT_PRICE_KEYS)
             mileage = next((_bounded_int(v.get(k), 0, 2_000_000)
                             for k in self._NEXT_MILEAGE_KEYS
                             if _bounded_int(v.get(k), 0, 2_000_000)), None)
@@ -642,6 +640,26 @@ class DealerScraper(BaseScraper):
     _PRICE_KEYS = ["internetPrice", "sellingPrice", "finalPrice", "salePrice",
                    "ourPrice", "our_price", "askingPrice", "price",
                    "originalPrice", "listPrice"]
+    # Key names that mark a field as a payment/lease figure, not an asking price.
+    _PAYMENT_KEY_RE = re.compile(
+        r"payment|per_?month|monthly|lease|bi_?weekly|weekly|down_?payment"
+        r"|due_?at|deposit|apr|finance", re.I)
+
+    def _pick_price(self, obj, keys, lo=100, hi=10_000_000):
+        """First whitelisted price field in priority order — but reject a value
+        that ALSO appears under a payment-named key on the same object. Catches
+        feeds where the generic `price` field actually holds the monthly figure
+        (e.g. {"price": 599, "monthly_payment": 599})."""
+        payment_vals = {
+            _to_int(v) for k, v in obj.items()
+            if self._PAYMENT_KEY_RE.search(str(k)) and _to_int(v) is not None
+        }
+        for k in keys:
+            p = _bounded_int(obj.get(k), lo, hi)
+            if p is None or p in payment_vals:
+                continue
+            return p
+        return None
     _MILEAGE_KEYS = ["mileage", "miles", "odometer"]
     _COLOR_KEYS   = ["exteriorColor", "exterior_color", "ext_color", "color"]
     _STOCK_KEYS   = ["stockNumber", "stock", "stockNo", "stock_number"]
@@ -687,9 +705,7 @@ class DealerScraper(BaseScraper):
                 continue
             seen.add(vin)
 
-            price = next((_bounded_int(o.get(k), 100, 10_000_000)
-                          for k in self._PRICE_KEYS
-                          if _bounded_int(o.get(k), 100, 10_000_000)), None)
+            price = self._pick_price(o, self._PRICE_KEYS)
             mileage = next((_bounded_int(o.get(k), 0, 2_000_000)
                             for k in self._MILEAGE_KEYS
                             if _bounded_int(o.get(k), 0, 2_000_000)), None)
@@ -934,6 +950,22 @@ class DealerScraper(BaseScraper):
                 continue
         return nodes
 
+    @staticmethod
+    def _is_lease_offer(o):
+        """schema.org offer that quotes a lease/monthly figure, not a sale price."""
+        if "lease" in str(o.get("@type", "")).lower():
+            return True
+        spec = o.get("priceSpecification")
+        if isinstance(spec, list):
+            spec = spec[0] if spec else None
+        if isinstance(spec, dict):
+            if "lease" in f"{spec.get('@type', '')} {spec.get('name', '')}".lower():
+                return True
+            unit = f"{spec.get('unitText', '')} {spec.get('unitCode', '')}".lower()
+            if "mon" in unit or "/mo" in unit or "week" in unit or "ann" in unit:
+                return True
+        return False
+
     def _jsonld_to_fields(self, n):
         name = (n.get("name") or n.get("description") or "").strip()
 
@@ -970,14 +1002,20 @@ class DealerScraper(BaseScraper):
             vin = None
         vin = vin.upper() if vin else None
 
-        # price — offers may be dict or list; price/lowPrice
+        # price — offers may be dict or list; price/lowPrice. Lease offers
+        # (lease @type, or a per-month priceSpecification) are never a real
+        # asking price: prefer the first non-lease offer in a list, and take
+        # only availability from a lease offer.
         price = None
         availability = None
         offers = n.get("offers")
         if isinstance(offers, list):
-            offers = offers[0] if offers else {}
+            offers = next((o for o in offers
+                           if isinstance(o, dict) and not self._is_lease_offer(o)),
+                          offers[0] if offers else {})
         if isinstance(offers, dict):
-            price = _bounded_int(offers.get("price") or offers.get("lowPrice"), 100, 10_000_000)
+            if not self._is_lease_offer(offers):
+                price = _bounded_int(offers.get("price") or offers.get("lowPrice"), 100, 10_000_000)
             availability = offers.get("availability")
 
         # mileage — mileageFromOdometer may be dict {value,unitCode} or number
@@ -1079,11 +1117,22 @@ class DealerScraper(BaseScraper):
             (t for t in re.findall(r'[A-HJ-NPR-Z0-9]{17}', seg) if _looks_like_vin(t)), None)
         if vin and _looks_like_vin(vin):
             f["vin"] = vin.upper()
-        pm = self._PRICE_RE.search(seg)
-        if pm:
+        skipped = []
+        for pm in self._PRICE_RE.finditer(seg):
             p = _bounded_int(_money_to_int(pm.group(1)), 500, 10_000_000)
-            if p:
-                f["price"] = p
+            if not p:
+                continue
+            # A finance widget's "$2,199/mo" or "$1,000 down" can precede the
+            # real price in the fragment — skip payment-context amounts and take
+            # the first clean one. Skipped values are kept for the debug trail.
+            if self._is_payment_context(seg, pm.start(), pm.end()):
+                if len(skipped) < 5:
+                    skipped.append(p)
+                continue
+            f["price"] = p
+            break
+        if skipped:
+            f["skipped_payment_prices"] = skipped
         return f
 
     def _html_field_map(self, html, page_url):
@@ -1192,6 +1241,14 @@ class DealerScraper(BaseScraper):
                 if listing.get(fld) in (None, "", 0) and ymm.get(fld):
                     listing[fld] = ymm[fld]
 
+        def note_skipped(listing, src):
+            # Debug trail: payment-context amounts we refused to use as a price.
+            # Only worth recording when the listing ended up price-less — it
+            # flows into listings.raw_data, so bad-parse dealers stay queryable.
+            if src.get("skipped_payment_prices") and not listing.get("price"):
+                listing.setdefault("raw", {})["skipped_payment_prices"] = \
+                    src["skipped_payment_prices"]
+
         if whole_page:
             src = self._fields_from_segment(html)
             for l in listings:
@@ -1199,6 +1256,7 @@ class DealerScraper(BaseScraper):
                 for fld in ("mileage", "vin", "price"):
                     if l.get(fld) in (None, "", 0) and src.get(fld):
                         l[fld] = src[fld]
+                note_skipped(l, src)
             return
 
         fmap = self._html_field_map(html, page_url)
@@ -1213,6 +1271,7 @@ class DealerScraper(BaseScraper):
             for fld in ("mileage", "vin", "price"):
                 if l.get(fld) in (None, "", 0) and src.get(fld):
                     l[fld] = src[fld]
+            note_skipped(l, src)
 
     # Fields worth recovering from a VDP when the SRP omitted them. Price and VIN
     # are deliberately excluded: VDP price widgets are unreliable (e.g. a flat

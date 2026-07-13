@@ -202,13 +202,15 @@ def _mark_best_per_group():
         # winning. Within a duplicate group every listing is the SAME car, so a
         # value far below the others (e.g. a payment/fee that slipped through as
         # a "price") is bogus. Treat anything under 40% of the group's top price
-        # as suspect and rank it last so it can't become the canonical listing.
+        # — or under $1,000 outright (payment-sized even in a cheap group) — as
+        # suspect and rank it last so it can't become the canonical listing.
         prices = [m["price"] for m in members if m["price"]]
         ref = max(prices) if prices else None
 
         def sort_key(m):
             p = m["price"]
-            suspect = p is None or (ref is not None and p < 0.40 * ref)
+            suspect = (p is None or p < 1000
+                       or (ref is not None and p < 0.40 * ref))
             return (
                 1 if suspect else 0,
                 p if (p is not None and not suspect) else float("inf"),
