@@ -42,6 +42,6 @@ _data = _load()
 SEARCH           = _data["search"]
 LOCATION         = _data["location"]
 SOURCES          = _data["sources"]
-DUPLICATE        = _data.get("duplicate", {"use_vin": True, "fuzzy_threshold": 85})
+DUPLICATE        = _data.get("duplicate", {"fuzzy_threshold": 85})
 DB_PATH          = _data.get("db_path", "data/cars.db")
 AUTO_REFRESH_HOURS = _data.get("auto_refresh_hours", 6)

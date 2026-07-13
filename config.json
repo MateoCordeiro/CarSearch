@@ -20,7 +20,6 @@
         "facebook": false
     },
     "duplicate": {
-        "use_vin": true,
         "fuzzy_threshold": 85
     },
     "db_path": "data/cars.db",

@@ -3,23 +3,19 @@ Flask web server for the Car Search dashboard.
 Run with: python app.py  →  open http://localhost:5000
 """
 
-import json
 import threading
-import time
 from flask import Flask, render_template, jsonify, request
 
 from database import init_db, get_listings, get_stats, get_conn
 from duplicates import run_deduplication
-from search import run_search, crawl_dealers
+from search import run_search
 import config as cfg
 
 app = Flask(__name__)
 
 # ── Background job state ──────────────────────────────────────
 
-_crawl_status  = {"running": False, "message": "Never run", "progress": 0, "last_run": None}
-_search_status = {"running": False, "message": "Idle",       "progress": 0}
-_crawl_thread  = None
+_search_status = {"running": False, "message": "Idle", "progress": 0}
 _search_thread = None
 
 
@@ -102,49 +98,6 @@ def api_config_save():
     import importlib
     importlib.reload(cfg)
     return jsonify({"ok": True})
-
-
-# ── Dealer crawl (populate DB with all inventory) ─────────────
-
-@app.route("/api/crawl", methods=["POST"])
-def api_crawl():
-    """Kick off background dealer crawl — stores ALL inventory, no filtering."""
-    global _crawl_thread, _crawl_status
-    if _crawl_status["running"]:
-        return jsonify({"error": "Crawl already running"}), 409
-
-    def _do_crawl():
-        global _crawl_status
-        _crawl_status = {"running": True, "message": "Starting dealer crawl...",
-                         "progress": 5, "last_run": None}
-        try:
-            import importlib
-            importlib.reload(cfg)
-            crawl_dealers(
-                zip_code  = cfg.LOCATION["zip"],
-                radius_mi = cfg.LOCATION["radius"],
-                progress_cb = lambda msg, pct: _crawl_status.update(
-                    {"message": msg, "progress": pct}
-                ),
-            )
-            _crawl_status = {"running": False, "message": "Running deduplication...",
-                             "progress": 95, "last_run": None}
-            run_deduplication()
-            now = time.strftime("%Y-%m-%d %H:%M")
-            _crawl_status = {"running": False, "message": f"Done — last crawl {now}",
-                             "progress": 100, "last_run": now}
-        except Exception as e:
-            _crawl_status = {"running": False, "message": f"Error: {e}",
-                             "progress": 0, "last_run": None}
-
-    _crawl_thread = threading.Thread(target=_do_crawl, daemon=True)
-    _crawl_thread.start()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/crawl/status")
-def api_crawl_status():
-    return jsonify(_crawl_status)
 
 
 # ── Search (query existing DB) ────────────────────────────────
@@ -240,23 +193,33 @@ def api_discover():
 
 @app.route("/api/dealers/classify", methods=["POST"])
 def api_classify():
-    import importlib, dealer_ops; importlib.reload(cfg)
     scope = (request.json or {}).get("scope", "all")
-    zip_code = cfg.LOCATION["zip"]; radius = cfg.LOCATION["radius"]
-    ok = _run_job("classify", lambda cb: dealer_ops.classify_dealers(
-        scope=scope, zip_code=zip_code, radius_mi=radius, progress_cb=cb))
+    ok = _run_job("classify", _classify_job(scope))
     return (jsonify({"ok": True}) if ok else (jsonify({"error": "already running"}), 409))
+
+
+def _scan_job(cb):
+    """Scan in-radius 'ok' dealers, diff inventory, then dedup listings.
+    Shared by the manual /api/dealers/scan route and the scheduler so both go
+    through the same _run_job lock and can never run concurrently."""
+    import importlib, dealer_ops; importlib.reload(cfg)
+    res = dealer_ops.scan_inventory(radius_mi=cfg.LOCATION["radius"], progress_cb=cb)
+    run_deduplication()
+    return res
+
+
+def _classify_job(scope, resume=True):
+    def job(cb):
+        import importlib, dealer_ops; importlib.reload(cfg)
+        return dealer_ops.classify_dealers(
+            scope=scope, zip_code=cfg.LOCATION["zip"], radius_mi=cfg.LOCATION["radius"],
+            resume=resume, progress_cb=cb)
+    return job
 
 
 @app.route("/api/dealers/scan", methods=["POST"])
 def api_scan():
-    import importlib, dealer_ops; importlib.reload(cfg)
-    radius = cfg.LOCATION["radius"]
-    def job(cb):
-        res = dealer_ops.scan_inventory(radius_mi=radius, progress_cb=cb)
-        run_deduplication()
-        return res
-    ok = _run_job("scan", job)
+    ok = _run_job("scan", _scan_job)
     return (jsonify({"ok": True}) if ok else (jsonify({"error": "already running"}), 409))
 
 
@@ -329,16 +292,15 @@ if __name__ == "__main__":
 
     if cfg.AUTO_REFRESH_HOURS > 0:
         from apscheduler.schedulers.background import BackgroundScheduler
-        import dealer_ops
         scheduler = BackgroundScheduler()
+
         def _scheduled_refresh():
             # Re-scrape already-classified ('ok') dealers in radius and diff vs
-            # the DB (new / sold). This is the curated discover→classify→scan
-            # flow — NOT the legacy cardealerdb crawl_dealers() path. On a fresh
-            # install with nothing classified yet, this is a safe no-op.
-            import importlib; importlib.reload(cfg)
-            dealer_ops.scan_inventory(radius_mi=cfg.LOCATION["radius"])
-            run_deduplication()
+            # the DB (new / sold). Same _scan_job as the manual route, behind the
+            # same _run_job lock, so a scheduled and a manual scan can't overlap.
+            # On a fresh install with nothing classified yet, this is a safe no-op.
+            if not _run_job("scan", _scan_job):
+                print("[skip] Scheduled scan skipped — a scan is already running")
         scheduler.add_job(_scheduled_refresh, "interval", hours=cfg.AUTO_REFRESH_HOURS)
 
         def _scheduled_reclassify():
@@ -346,13 +308,12 @@ if __name__ == "__main__":
             # the last 12h) so transiently 'unreachable'/'blocked' dealers — e.g. a
             # site that was 503/WAF-blocked at scan time — automatically recover to
             # 'ok' and get picked up by the next scan, with no manual re-run.
-            import importlib; importlib.reload(cfg)
-            dealer_ops.classify_dealers(scope="radius", zip_code=cfg.LOCATION["zip"],
-                                        radius_mi=cfg.LOCATION["radius"], resume=True)
+            if not _run_job("classify", _classify_job("radius")):
+                print("[skip] Scheduled re-classify skipped — classify already running")
         scheduler.add_job(_scheduled_reclassify, "interval", hours=24)
 
         scheduler.start()
         print(f"[OK] Auto-refresh every {cfg.AUTO_REFRESH_HOURS}h; re-classify every 24h")
 
     print("✓ Car Search running at http://localhost:5000")
-    app.run(debug=True, use_reloader=False)
+    app.run(debug=False, use_reloader=False)

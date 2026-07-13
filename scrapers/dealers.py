@@ -1,10 +1,10 @@
 """
-Dealer scraper using cardealerdb.com to find dealerships,
-then scraping ALL their inventory into the database.
+Dealer-website inventory scraper.
 
-Two public methods:
-  crawl(zip_code, radius_mi)  — find dealers + store all inventory (no filtering)
-  search(config)              — legacy shim, calls crawl()
+Used by the discover→classify→scan pipeline in dealer_ops.py:
+  _scrape_inventory(dealer)   — scrape one dealer site's full inventory
+  _fetch_dealer_detail(url)   — parse a cardealerdb.com dealer page
+                                (tx_directory.py uses this to build the directory)
 
 cardealerdb.com URL structure:
   City list:   https://cardealerdb.com/in/{STATE}/{city-slug}
@@ -13,15 +13,10 @@ cardealerdb.com URL structure:
 
 import re
 import json
-import time
 from html import unescape as html_unescape
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
-from geopy.geocoders import Nominatim
-from geopy.distance import geodesic
 from .base import BaseScraper
-
-CARDEALERDB = "https://cardealerdb.com"
 
 
 def _money_to_int(text):
@@ -61,172 +56,12 @@ def _slugify(s):
 class DealerScraper(BaseScraper):
     name = "dealer"
 
-    def __init__(self):
-        super().__init__()
-        self._geo = Nominatim(user_agent="car-search-app-v2")
-        self._coord_cache = {}
-
-    # ── Public entry points ───────────────────────────────────
-
-    def crawl(self, zip_code: str, radius_mi: int = 50) -> list:
-        """Find all dealerships within radius and store their full inventory.
-        No make/model filtering — stores every car found.
-        Returns list of all raw listing dicts saved."""
-        city, state, origin = self._zip_to_city_state(zip_code)
-        if not city or not state:
-            print(f"[dealer] Could not geocode ZIP {zip_code}")
-            return []
-
-        print(f"[dealer] Crawling dealers near {city}, {state} (radius {radius_mi}mi)")
-
-        dealers = self._find_dealers_cardealerdb(city, state, origin, radius_mi)
-        print(f"[dealer] Found {len(dealers)} dealerships")
-
-        if not dealers:
-            return []
-
-        from database import upsert_dealership, upsert_listing, update_dealer_scrape_status
-        all_listings = []
-
-        for dealer in dealers:
-            dealer_id = upsert_dealership(dealer)
-            dealer["id"] = dealer_id
-
-            if not dealer.get("website"):
-                update_dealer_scrape_status(dealer_id, "none", "unsupported", 0,
-                                            "no website on file")
-                continue
-
-            listings, platform, status, note = self._scrape_inventory(dealer)
-            for l in listings:
-                l["dealership_id"] = dealer_id
-                upsert_listing(l)          # persist as we go so progress survives errors
-            all_listings.extend(listings)
-            update_dealer_scrape_status(dealer_id, platform, status, len(listings), note)
-            print(f"  [{status:11}] {dealer['name'][:38]:38} {len(listings):4} ({platform})")
-
-        print(f"[dealer] Total inventory stored: {len(all_listings)}")
-        return all_listings
-
     def search(self, config: dict) -> list:
-        """Called by the legacy search pipeline. Triggers a crawl."""
-        return self.crawl(
-            zip_code=config.get("zip", ""),
-            radius_mi=config.get("radius_mi", 50),
-        )
+        """BaseScraper interface stub. Dealer inventory is driven per-dealer by
+        dealer_ops.py (discover→classify→scan), not by query-based search."""
+        return []
 
     # ── cardealerdb.com ───────────────────────────────────────
-
-    def _zip_to_city_state(self, zip_code):
-        _ZIP_FALLBACK = {
-            "78664": ("Round Rock", "TX", (30.5083, -97.6789)),
-            "78681": ("Round Rock", "TX", (30.5083, -97.6789)),
-            "78701": ("Austin",     "TX", (30.2672, -97.7431)),
-            "78750": ("Austin",     "TX", (30.4200, -97.7900)),
-        }
-
-        queries = [
-            f"{zip_code}, USA",
-            {"postalcode": zip_code, "countrycodes": "us"},
-        ]
-        for q in queries:
-            try:
-                time.sleep(0.3)
-                loc = self._geo.geocode(q, exactly_one=True, addressdetails=True)
-                if loc:
-                    addr  = loc.raw.get("address", {})
-                    city  = (addr.get("city") or addr.get("town") or
-                             addr.get("village") or addr.get("county") or
-                             loc.address.split(",")[0]).strip()
-                    state = (addr.get("state_code") or
-                             self._state_name_to_abbr(addr.get("state", "")))
-                    if city and state:
-                        print(f"[dealer] ZIP {zip_code} → {city}, {state}")
-                        return city, state, (loc.latitude, loc.longitude)
-            except Exception as e:
-                print(f"[dealer] Geocode attempt failed: {e}")
-                continue
-
-        if zip_code in _ZIP_FALLBACK:
-            city, state, coords = _ZIP_FALLBACK[zip_code]
-            print(f"[dealer] ZIP {zip_code} → {city}, {state} (fallback)")
-            return city, state, coords
-
-        print(f"[dealer] Could not geocode ZIP {zip_code}")
-        return None, None, (None, None)
-
-    def _city_to_slug(self, city):
-        return re.sub(r"[^a-z0-9]+", "-", city.lower()).strip("-")
-
-    _STATE_CITIES = {
-        "TX": ["Austin","Round Rock","Georgetown","Cedar Park","Pflugerville","Kyle","Buda",
-               "San Marcos","Leander","Hutto","Taylor","San Antonio","New Braunfels","Seguin",
-               "Lockhart","Bastrop","Elgin","Manor","Lakeway","Bee Cave","Waco","Temple","Killeen"],
-        "CA": ["Los Angeles","San Diego","San Jose","San Francisco","Fresno","Sacramento",
-               "Long Beach","Oakland","Bakersfield","Anaheim","Riverside","Stockton"],
-        "FL": ["Jacksonville","Miami","Tampa","Orlando","St. Petersburg","Hialeah","Tallahassee",
-               "Fort Lauderdale","Cape Coral","Pembroke Pines","Hollywood","Gainesville"],
-        "NY": ["New York","Buffalo","Rochester","Yonkers","Syracuse","Albany","New Rochelle",
-               "Mount Vernon","Schenectady","Utica","White Plains","Troy"],
-    }
-
-    def _find_dealers_cardealerdb(self, city, state, origin, radius_mi):
-        visited  = set()
-        dealers  = []
-
-        # Seed: start city + known cities in state filtered by radius
-        candidate_cities = [(city, state)]
-        for known_city in self._STATE_CITIES.get(state, []):
-            if known_city.lower() != city.lower():
-                candidate_cities.append((known_city, state))
-
-        queue = []
-        for c, s in candidate_cities:
-            if c.lower() == city.lower():
-                queue.append((c, s))
-                continue
-            if origin[0]:
-                coords = self._geocode_city(c, s)
-                if coords and geodesic(origin, coords).miles <= radius_mi:
-                    queue.append((c, s))
-            else:
-                queue.append((c, s))
-
-        print(f"[dealer] Searching {len(queue)} cities near {city}, {state}")
-
-        for c_name, c_state in queue:
-            slug = self._city_to_slug(c_name)
-            key  = f"{c_state}/{slug}"
-            if key in visited:
-                continue
-            visited.add(key)
-
-            url  = f"{CARDEALERDB}/in/{c_state}/{slug}"
-            resp = self._get(url)
-            if not resp or resp.status_code != 200:
-                continue
-
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-            # Dealer links are relative ("go/TX/{city}/{slug}/{id}") on the live
-            # site, so match the path segment rather than requiring "/go/".
-            seen_hrefs = set()
-            for link in soup.select("a[href]"):
-                m = re.search(r"(?:^|/)(go/[^\s\"']+)", link.get("href", ""))
-                if not m:
-                    continue
-                href = f"{CARDEALERDB}/{m.group(1)}"
-                if href in seen_hrefs:
-                    continue
-                seen_hrefs.add(href)
-                detail = self._fetch_dealer_detail(href, c_name, c_state)
-                if detail:
-                    dealers.append(detail)
-
-            if len(dealers) >= 100:
-                break
-
-        return dealers
 
     def _fetch_dealer_detail(self, url, city, state):
         resp = self._get(url)
@@ -1676,38 +1511,3 @@ class DealerScraper(BaseScraper):
             u for u in locs
             if self._VDP_URL_RE.search(u) and not self._VDP_NEG_RE.search(u)))
 
-    # ── Helpers ───────────────────────────────────────────────
-
-    def _geocode_city(self, city, state):
-        key = f"{city},{state}"
-        if key in self._coord_cache:
-            return self._coord_cache[key]
-        try:
-            time.sleep(0.5)
-            loc = self._geo.geocode(f"{city}, {state}, USA", exactly_one=True)
-            if loc:
-                result = (loc.latitude, loc.longitude)
-                self._coord_cache[key] = result
-                return result
-        except Exception:
-            pass
-        return None
-
-    _STATE_ABBRS = {
-        "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
-        "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
-        "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
-        "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
-        "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
-        "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
-        "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
-        "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
-        "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
-        "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
-        "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
-        "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
-        "wisconsin": "WI", "wyoming": "WY",
-    }
-
-    def _state_name_to_abbr(self, name):
-        return self._STATE_ABBRS.get(name.lower(), "")

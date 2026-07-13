@@ -8,6 +8,12 @@ import json
 from datetime import datetime
 from config import DB_PATH
 
+# Display floor for the "real prices only" filter. A real used car clears
+# $1,000; anything below is almost always a payment/fee fragment. The ingest
+# floor is scrapers.base.MIN_SANE_PRICE (500) — intentionally lower so a
+# genuinely cheap beater is stored even if the UI filter hides it.
+REAL_PRICE_FLOOR = 1000
+
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=15)
@@ -96,24 +102,8 @@ def init_db():
         created_at    TEXT DEFAULT (datetime('now'))
     )""")
 
-    # ── Search Configs (saved searches) ──────────────────────
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS search_configs (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        name        TEXT NOT NULL,
-        make        TEXT,
-        model       TEXT,
-        year_min    INTEGER,
-        year_max    INTEGER,
-        price_min   INTEGER,
-        price_max   INTEGER,
-        mileage_max INTEGER,
-        zip         TEXT,
-        radius_mi   INTEGER,
-        sources     TEXT,                     -- JSON array
-        is_active   INTEGER DEFAULT 1,
-        created_at  TEXT DEFAULT (datetime('now'))
-    )""")
+    # Saved-searches table from an abandoned feature; no code ever wrote to it.
+    c.execute("DROP TABLE IF EXISTS search_configs")
 
     # ── Scrape Log ────────────────────────────────────────────
     c.execute("""
@@ -401,11 +391,16 @@ def get_listings(filters: dict = None) -> list:
             # Just drop missing prices and obvious payment fragments (monthly /
             # down payments like "$225" or "$530"). Deliberately low so it never
             # hides a genuinely cheap car — a real used car clears $1,000.
-            sql += " AND l.price IS NOT NULL AND l.price >= 1000"
+            # Distinct from scrapers.base.MIN_SANE_PRICE (500), the "is this a
+            # price at all" floor applied at ingest; config.json search.price_min
+            # is the third, user-editable knob on top.
+            sql += " AND l.price IS NOT NULL AND l.price >= ?"
+            params.append(REAL_PRICE_FLOOR)
         if filters.get("hide_duplicates"):
             sql += " AND l.is_duplicate = 0"
 
-    sql += " ORDER BY l.price ASC"
+    # NULLs sort first in SQLite ASC — push price-less listings to the bottom.
+    sql += " ORDER BY (l.price IS NULL), l.price ASC"
     rows = c.execute(sql, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
