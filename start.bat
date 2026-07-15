@@ -3,7 +3,7 @@ REM Force UTF-8 console so status output (checkmarks, dashes) never crashes on
 REM a legacy Windows code page. config.py also guards this in-process.
 set PYTHONIOENCODING=utf-8
 
-echo === Car Search Dashboard ===
+echo === BumperScraper ===
 echo.
 
 echo Installing dependencies...

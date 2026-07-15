@@ -1,5 +1,5 @@
 """
-Flask web server for the Car Search dashboard.
+Flask web server for the BumperScraper dashboard.
 Run with: python app.py  →  open http://localhost:5000
 """
 
@@ -315,5 +315,5 @@ if __name__ == "__main__":
         scheduler.start()
         print(f"[OK] Auto-refresh every {cfg.AUTO_REFRESH_HOURS}h; re-classify every 24h")
 
-    print("✓ Car Search running at http://localhost:5000")
+    print("✓ BumperScraper running at http://localhost:5000")
     app.run(debug=False, use_reloader=False)

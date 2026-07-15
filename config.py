@@ -1,5 +1,5 @@
 """
-Car Search Configuration — loaded from config.json.
+BumperScraper configuration — loaded from config.json.
 Edit config.json directly, or use the dashboard UI.
 """
 

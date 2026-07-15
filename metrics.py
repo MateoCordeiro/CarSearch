@@ -138,7 +138,7 @@ def collect():
 
 
 def report(m):
-    print(f"=== CarSearch metrics  {m['generated_at']} ===\n")
+    print(f"=== BumperScraper metrics  {m['generated_at']} ===\n")
     cov = m["coverage"]
     ok = cov.get("ok", 0)
     print(f"COVERAGE  working set {m['dealers_total']} dealers | "

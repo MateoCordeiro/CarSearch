@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import database
 
 # Point the whole database layer at a temp file BEFORE anything opens a conn.
-_tmpdir = tempfile.mkdtemp(prefix="carsearch-test-")
+_tmpdir = tempfile.mkdtemp(prefix="bumperscraper-test-")
 database.DB_PATH = os.path.join(_tmpdir, "test.db")
 database.init_db()
 

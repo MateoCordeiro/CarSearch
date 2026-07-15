@@ -1,5 +1,5 @@
 """
-Database layer for Car Search.
+Database layer for BumperScraper.
 Uses SQLite — no server setup needed, everything lives in data/cars.db
 """
 

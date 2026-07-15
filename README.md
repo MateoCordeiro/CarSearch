@@ -1,4 +1,6 @@
-# CarSearch
+# 🚗 BumperScraper
+
+**Every lot. Every listing. Your radius.**
 
 A local, single-user used-car search engine. Scrapes dealer websites directly
 into SQLite, deduplicates cross-listed cars, and serves a dark-mode dashboard
