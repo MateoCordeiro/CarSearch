@@ -31,6 +31,8 @@ from discovery.merge import merge_candidates
 from discovery.osm import candidates_from_payload, nearest_zip
 from discovery.registry import (_tx_rows_from_sheet, _parse_fl_table,
                                  states_in_radius, RegistryProvider)
+from discovery.websites import resolve_website, should_attempt, _is_blocked, _ddg_search
+from discovery.places import PlacesBudget, search_website
 
 FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "discovery")
 
@@ -307,6 +309,255 @@ def test_registry_provider_find_uses_snapshot_and_radius_filter():
     assert c.source == "registry:TX"
     assert c.source_id == "P999"
     assert c.zip == "78628"
+
+
+# ── discovery/websites.py: resolve_website chain (stubbed, no network) ──
+def _raising_stub(*a, **k):
+    raise AssertionError("this stub must not be called")
+
+
+PLACES_ON = {"sources": {"places": True}, "google_places_key": "test-key",
+             "web_search_fallback": False}
+PLACES_OFF = {"sources": {"places": False}, "google_places_key": "test-key",
+              "web_search_fallback": False}
+DDG_ON = {"sources": {"places": False}, "google_places_key": "",
+          "web_search_fallback": True}
+DDG_OFF = {"sources": {"places": False}, "google_places_key": "",
+           "web_search_fallback": False}
+
+
+def test_resolve_website_prefers_existing_osm_tag_website():
+    c = Candidate(name="Round Rock Toyota", website="https://roundrocktoyota.com",
+                  source="osm", source_id="node/1")
+    website, source = resolve_website(c, DDG_ON, places_search=_raising_stub, ddg_search=_raising_stub)
+    assert website == "https://roundrocktoyota.com"
+    assert source == "osm-tag"
+
+
+def test_resolve_website_existing_website_non_osm_source_is_merge_fill():
+    c = Candidate(name="Test Motors", website="https://testmotors.example",
+                  source="places", source_id="place-1")
+    website, source = resolve_website(c, DDG_ON, places_search=_raising_stub, ddg_search=_raising_stub)
+    assert website == "https://testmotors.example"
+    assert source == "merge-fill"
+
+
+def test_resolve_website_garbage_existing_website_falls_through_to_places():
+    # regression: a garbage/unparseable website tag value (real OSM data
+    # does contain junk like "yes") used to be treated as "already
+    # resolved" (since it's truthy and not on the blocklist) and returned
+    # (None, "osm-tag") without ever trying Places/DDG.
+    c = Candidate(name="Test Motors", city="Austin", state="TX", lat=30.5, lng=-97.6,
+                  website="yes", source="osm", source_id="node/1")
+    website, source = resolve_website(
+        c, PLACES_ON, places_search=lambda *a, **k: "https://testmotors.example",
+        places_budget=PlacesBudget(5),
+    )
+    assert website == "https://testmotors.example"
+    assert source == "places"
+
+
+def test_resolve_website_blocklisted_existing_falls_through_to_places():
+    c = Candidate(name="Test Motors", city="Austin", state="TX", lat=30.5, lng=-97.6,
+                  website="https://www.facebook.com/testmotors", source="osm", source_id="node/2")
+    website, source = resolve_website(
+        c, PLACES_ON,
+        places_search=lambda *a, **k: "https://testmotors.example",
+        places_budget=PlacesBudget(5),
+    )
+    assert website == "https://testmotors.example"
+    assert source == "places"
+
+
+def test_resolve_website_places_disabled_skips_places_stub():
+    c = Candidate(name="Test Motors", city="Austin", state="TX", lat=30.5, lng=-97.6)
+    website, source = resolve_website(c, PLACES_OFF, places_search=_raising_stub,
+                                       ddg_search=_raising_stub, places_budget=PlacesBudget(5))
+    assert (website, source) == (None, None)
+
+
+def test_resolve_website_places_result_canonicalized():
+    c = Candidate(name="Test Motors", city="Austin", state="TX", lat=30.5, lng=-97.6)
+    website, source = resolve_website(
+        c, PLACES_ON,
+        places_search=lambda *a, **k: "http://www.Dealer-Example.com/inventory?x=1",
+        places_budget=PlacesBudget(5),
+    )
+    assert website == "https://dealer-example.com"
+    assert source == "places"
+
+
+def test_resolve_website_ddg_rejected_low_name_domain_score():
+    c = Candidate(name="Round Rock Toyota", city="Round Rock", state="TX")
+    website, source = resolve_website(
+        c, DDG_ON, ddg_search=lambda *a, **k: "https://totallyunrelatedsite.example",
+    )
+    assert (website, source) == (None, None)
+
+
+def test_resolve_website_ddg_accepted_good_name_domain_score():
+    c = Candidate(name="Round Rock Toyota", city="Round Rock", state="TX")
+    website, source = resolve_website(
+        c, DDG_ON, ddg_search=lambda *a, **k: "https://roundrocktoyota.com/some/path",
+    )
+    assert website == "https://roundrocktoyota.com"
+    assert source == "web-search"
+
+
+def test_resolve_website_web_search_disabled_skips_ddg_stub():
+    c = Candidate(name="Round Rock Toyota", city="Round Rock", state="TX")
+    website, source = resolve_website(c, DDG_OFF, ddg_search=_raising_stub)
+    assert (website, source) == (None, None)
+
+
+def test_resolve_website_gives_up_returns_none_none():
+    c = Candidate(name="Nobody Motors", city="Nowhere", state="TX")
+    website, source = resolve_website(c, DDG_OFF)
+    assert (website, source) == (None, None)
+
+
+def test_is_blocked_matches_domain_and_subdomain_not_unrelated():
+    assert _is_blocked("https://www.facebook.com/somedealer")
+    assert _is_blocked("https://m.facebook.com/somedealer")
+    assert not _is_blocked("https://roundrocktoyota.com")
+    assert not _is_blocked(None)
+
+
+def test_should_attempt_recent_check_blocks_reattempt():
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    recent = (now - timedelta(days=5)).isoformat()
+    assert should_attempt(recent, refresh_days=30, now=now) is False
+
+
+def test_should_attempt_old_check_allows_reattempt():
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    old = (now - timedelta(days=40)).isoformat()
+    assert should_attempt(old, refresh_days=30, now=now) is True
+
+
+def test_should_attempt_no_prior_check_allows_attempt():
+    assert should_attempt(None) is True
+
+
+# ── discovery/places.py: search_website (stubbed HTTP, no network/key) ──
+class _FakePlacesResp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def test_places_budget_spend_and_exhaustion():
+    b = PlacesBudget(cap=2)
+    assert b.spend() is True
+    assert b.spend() is True
+    assert b.spend() is False
+    assert b.exhausted is True
+
+
+def test_search_website_no_api_key_never_calls_post():
+    result = search_website(None, "Test Motors", "Austin", "TX", 30.5, -97.6,
+                             PlacesBudget(5), _post=_raising_stub)
+    assert result is None
+
+
+def test_search_website_exhausted_budget_never_calls_post():
+    exhausted = PlacesBudget(0)
+    result = search_website("key", "Test Motors", "Austin", "TX", 30.5, -97.6,
+                             exhausted, _post=_raising_stub)
+    assert result is None
+
+
+def test_search_website_accepts_result_within_proximity():
+    payload = {"places": [{"websiteUri": "https://testmotors.example",
+                            "location": {"latitude": 30.5, "longitude": -97.6}}]}
+    result = search_website("key", "Test Motors", "Austin", "TX", 30.5, -97.6,
+                             PlacesBudget(5), _post=lambda *a, **k: _FakePlacesResp(payload))
+    assert result == "https://testmotors.example"
+
+
+def test_search_website_rejects_result_too_far():
+    payload = {"places": [{"websiteUri": "https://testmotors.example",
+                            "location": {"latitude": 31.5, "longitude": -98.5}}]}
+    result = search_website("key", "Test Motors", "Austin", "TX", 30.5, -97.6,
+                             PlacesBudget(5), _post=lambda *a, **k: _FakePlacesResp(payload))
+    assert result is None
+
+
+def test_search_website_missing_coords_does_not_spend_budget():
+    # regression: budget used to be spent BEFORE the lat/lng check, wasting
+    # a slot on a candidate that could never complete a real lookup anyway.
+    b = PlacesBudget(5)
+    result = search_website("key", "Test Motors", "Austin", "TX", None, None, b, _post=_raising_stub)
+    assert result is None
+    assert b.calls_made == 0
+
+
+def test_resolve_website_nameless_candidate_gives_up_without_searching():
+    # regression: a nameless candidate used to reach places_search/ddg_search
+    # with name=None, producing a "None <city> <state>" query.
+    c = Candidate(name=None, city="Austin", state="TX", lat=30.5, lng=-97.6, source="osm")
+    website, source = resolve_website(c, PLACES_ON, places_search=_raising_stub,
+                                       ddg_search=_raising_stub, places_budget=PlacesBudget(5))
+    assert (website, source) == (None, None)
+
+
+class _FakeDdgResp:
+    def __init__(self, html):
+        self.text = html
+
+    def raise_for_status(self):
+        pass
+
+
+def test_ddg_search_skips_sponsored_ad_picks_organic_result():
+    # Real markup shape + this exact failure mode confirmed live 2026-07-18
+    # (see docs/PROGRESS.md): a real search for "Round Rock Toyota" put a
+    # PAID AD for a different dealer (Toyota of Cedar Park) first on the
+    # page, ahead of the organic result__a for the dealer actually searched
+    # for. A naive "first result__a on the page" grab returns the ad's
+    # tracking-redirect link, not the dealer's own site.
+    html = '''
+    <div class="result results_links results_links_deep result--ad ">
+      <a class="result__a" href="https://duckduckgo.com/y.js?ad_domain=toyotaofcedarpark.com">Toyota of Cedar Park (Ad)</a>
+    </div>
+    <div class="result results_links results_links_deep web-result ">
+      <a class="result__a" href="https://www.roundrocktoyota.com/">Round Rock Toyota</a>
+    </div>
+    '''
+    result = _ddg_search("Round Rock Toyota", "Round Rock", "TX",
+                          _post=lambda *a, **k: _FakeDdgResp(html), _sleep=lambda s: None)
+    assert result == "https://www.roundrocktoyota.com/"
+
+
+def test_ddg_search_all_ads_no_organic_returns_none():
+    html = '''
+    <div class="result results_links results_links_deep result--ad ">
+      <a class="result__a" href="https://duckduckgo.com/y.js?ad_domain=somewhere.com">Ad</a>
+    </div>
+    '''
+    result = _ddg_search("Nobody Motors", "Nowhere", "TX",
+                          _post=lambda *a, **k: _FakeDdgResp(html), _sleep=lambda s: None)
+    assert result is None
+
+
+def test_ddg_search_no_results_returns_none():
+    html = '<html><body>no results here</body></html>'
+    result = _ddg_search("Nobody Motors", "Nowhere", "TX",
+                          _post=lambda *a, **k: _FakeDdgResp(html), _sleep=lambda s: None)
+    assert result is None
+
+
+def test_search_website_empty_results_returns_none():
+    result = search_website("key", "Test Motors", "Austin", "TX", 30.5, -97.6,
+                             PlacesBudget(5), _post=lambda *a, **k: _FakePlacesResp({"places": []}))
+    assert result is None
 
 
 if __name__ == "__main__":

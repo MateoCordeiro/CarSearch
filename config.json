@@ -30,7 +30,7 @@
         },
         "google_places_key": "",
         "places_call_budget_per_run": 300,
-        "web_search_fallback": true,
+        "web_search_fallback": false,
         "registry_refresh_days": 7
     },
     "db_path": "data/cars.db",

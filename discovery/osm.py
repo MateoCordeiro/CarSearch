@@ -33,7 +33,6 @@ _ENDPOINTS = (
 # most a couple of times a day per user.
 _USER_AGENT = "BumperScraper/1.x (personal use; +contact)"
 _TIMEOUT = 185  # the query itself carries a server-side 180s budget
-_RETRYABLE_STATUS = (429, 504)
 
 _CACHE_DIR = os.path.join("data", "http_cache")
 

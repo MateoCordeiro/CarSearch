@@ -30,7 +30,7 @@ from bs4 import BeautifulSoup
 from geopy.distance import geodesic
 
 from database import get_conn, log_event
-from discovery.base import Candidate
+from discovery.base import Candidate, zip5
 
 _HEADERS = {"User-Agent": "BumperScraper/1.x (personal use; +contact)"}
 _TIMEOUT = 60
@@ -280,7 +280,7 @@ def _zip_coords_map(conn, zips):
     snapshot can be 15k+ rows; calling database.zip_to_coords() per row
     would open and close that many separate SQLite connections in a tight
     loop for no reason — this does one query instead."""
-    zips5 = sorted({str(z)[:5] for z in zips if z})
+    zips5 = sorted({zip5(z) for z in zips} - {""})
     if not zips5:
         return {}
     placeholders = ",".join("?" * len(zips5))
@@ -303,7 +303,7 @@ class RegistryProvider:
             zip_map = _zip_coords_map(conn, [r["zip"] for r in rows])
             conn.close()
             for row in rows:
-                coords = zip_map.get(str(row["zip"] or "")[:5])
+                coords = zip_map.get(zip5(row["zip"]))
                 if not coords:
                     continue
                 if geodesic((lat, lng), coords).miles > radius_mi:

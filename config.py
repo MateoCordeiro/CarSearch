@@ -58,6 +58,9 @@ DISCOVERY = {
     },
     "google_places_key":          _discovery_data.get("google_places_key", ""),
     "places_call_budget_per_run": _discovery_data.get("places_call_budget_per_run", 300),
-    "web_search_fallback":        _discovery_data.get("web_search_fallback", True),
+    # Off by default: this is the one discovery source that impersonates a
+    # browser (DuckDuckGo blocks the honest UA used everywhere else in
+    # discovery/) rather than identifying honestly — opt-in, not opt-out.
+    "web_search_fallback":        _discovery_data.get("web_search_fallback", False),
     "registry_refresh_days":      _discovery_data.get("registry_refresh_days", 7),
 }
