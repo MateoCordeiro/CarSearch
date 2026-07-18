@@ -30,7 +30,7 @@ def _load():
 def save_config(data: dict):
     """Merge and persist config changes to config.json."""
     existing = _load()
-    for key in ("search", "location", "sources"):
+    for key in ("search", "location", "sources", "discovery"):
         if key in data:
             existing[key] = data[key]
     with open(_cfg_path, "w") as f:
@@ -45,3 +45,19 @@ SOURCES          = _data["sources"]
 DUPLICATE        = _data.get("duplicate", {"fuzzy_threshold": 85})
 DB_PATH          = _data.get("db_path", "data/cars.db")
 AUTO_REFRESH_HOURS = _data.get("auto_refresh_hours", 6)
+
+# Autonomous dealer-discovery round. Every key has a .get() default because
+# existing config.json files (pre-discovery installs) won't have this block
+# at all — see docs/PLAN-discovery.md "Config read at call time".
+_discovery_data = _data.get("discovery", {})
+DISCOVERY = {
+    "sources": {
+        "osm":      _discovery_data.get("sources", {}).get("osm", True),
+        "registry": _discovery_data.get("sources", {}).get("registry", True),
+        "places":   _discovery_data.get("sources", {}).get("places", False),
+    },
+    "google_places_key":          _discovery_data.get("google_places_key", ""),
+    "places_call_budget_per_run": _discovery_data.get("places_call_budget_per_run", 300),
+    "web_search_fallback":        _discovery_data.get("web_search_fallback", True),
+    "registry_refresh_days":      _discovery_data.get("registry_refresh_days", 7),
+}

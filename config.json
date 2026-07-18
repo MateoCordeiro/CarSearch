@@ -22,6 +22,17 @@
     "duplicate": {
         "fuzzy_threshold": 85
     },
+    "discovery": {
+        "sources": {
+            "osm": true,
+            "registry": true,
+            "places": false
+        },
+        "google_places_key": "",
+        "places_call_budget_per_run": 300,
+        "web_search_fallback": true,
+        "registry_refresh_days": 7
+    },
     "db_path": "data/cars.db",
-    "auto_refresh_hours": 6
+    "auto_refresh_hours": 24
 }

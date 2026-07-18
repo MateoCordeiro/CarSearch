@@ -188,9 +188,35 @@ def init_db():
         ("quality_flags",     "TEXT"),    # Phase 5: comma-list of triggered flags
         ("quality_at",        "TEXT"),    # Phase 5: when quality was last computed
         ("canonical_dealer_id","INTEGER"),# Phase 4.1: set ⇒ this row duplicates that dealer's inventory feed (skip it)
+        ("discovery_source",   "TEXT"),   # Phase 5 discovery: 'osm' | 'registry' | 'directory' | ...
+        ("discovery_source_id","TEXT"),   # id of this dealer within discovery_source
+        ("website_source",     "TEXT"),   # how website was resolved: osm-tag | merge-fill | places | web-search
+        ("website_checked_at", "TEXT"),   # last website-resolution attempt (gates re-attempts)
+        ("location_tag",       "TEXT"),   # "{zip}:{radius}" of the discovery run that last confirmed this dealer is in-radius
     ]:
         if col not in existing_cols:
             c.execute(f"ALTER TABLE dealerships ADD COLUMN {col} {ddl}")
+
+    # ── State dealer-license registry snapshots (discovery round) ─
+    # Secondary discovery source: state DMV/HSMV dealer-license lists. No
+    # websites, but authoritative addresses. Refreshed on registry_refresh_days;
+    # never modified by inventory crawls, same convention as tx_directory.
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS state_registry (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        state        TEXT NOT NULL,
+        license_no   TEXT,
+        name         TEXT,
+        dba          TEXT,
+        address      TEXT,
+        city         TEXT,
+        zip          TEXT,
+        phone        TEXT,
+        email        TEXT,
+        license_type TEXT,
+        captured_at  TEXT DEFAULT (datetime('now'))
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_stateregistry_state ON state_registry(state)")
 
     conn.commit()
     conn.close()

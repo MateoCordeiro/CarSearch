@@ -1,0 +1,41 @@
+{
+  "elements": [
+    {
+      "type": "node",
+      "id": 1001,
+      "lat": 30.515,
+      "lon": -97.685,
+      "tags": {
+        "shop": "car",
+        "name": "Round Rock Toyota",
+        "website": "https://www.roundrocktoyota.com",
+        "addr:housenumber": "100",
+        "addr:street": "S I-35",
+        "addr:postcode": "78664",
+        "addr:city": "Round Rock",
+        "addr:state": "TX",
+        "phone": "+1-512-555-0100"
+      }
+    },
+    {
+      "type": "way",
+      "id": 2002,
+      "center": {"lat": 30.505, "lon": -97.675},
+      "tags": {
+        "shop": "car",
+        "name": "Georgetown Mazda",
+        "contact:website": "https://georgetownmazda.example"
+      }
+    },
+    {
+      "type": "node",
+      "id": 3003,
+      "lat": 30.512,
+      "lon": -97.680,
+      "tags": {
+        "shop": "car",
+        "name": "No Website Motors"
+      }
+    }
+  ]
+}

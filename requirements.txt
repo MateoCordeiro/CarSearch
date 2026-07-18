@@ -6,3 +6,4 @@ rapidfuzz
 geopy
 apscheduler
 python-dotenv
+xlrd
