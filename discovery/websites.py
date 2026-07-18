@@ -60,6 +60,19 @@ def _is_blocked(website):
     return any(host == b or host.endswith("." + b) for b in BLOCKLIST)
 
 
+def usable_website(website):
+    """Canonical form of a website value that will resolve for free (parses
+    to a real host and isn't blocklisted), else None. The orchestrator's
+    30-day guard uses this too: a candidate whose website tag is garbage
+    ("yes" — real OSM data) or blocked (a Facebook page) must be gated like
+    a site-less candidate, or it re-spends a Places/DDG attempt every
+    single run no matter how recently it was last checked."""
+    canon = canonical_website(website)
+    if canon and not _is_blocked(canon):
+        return canon
+    return None
+
+
 def should_attempt(website_checked_at, refresh_days=REATTEMPT_DAYS, now=None):
     """False if this dealer was checked (successfully or not) within
     refresh_days — the Places cost guard: without this, a daily scheduled
@@ -117,8 +130,8 @@ def resolve_website(candidate, config, places_budget=None, run_id=None,
     `places_search`/`ddg_search` are injectable so tests can stub both
     network calls out entirely (plan: "stubbed tests") — production callers
     should leave them at their defaults."""
-    existing = canonical_website(candidate.website)
-    if existing and not _is_blocked(existing):
+    existing = usable_website(candidate.website)
+    if existing:
         source = "osm-tag" if candidate.source == "osm" else "merge-fill"
         return existing, source
 

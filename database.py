@@ -218,6 +218,29 @@ def init_db():
     )""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_stateregistry_state ON state_registry(state)")
 
+    # ── Migration: canonicalize existing dealer website values ───
+    # _ensure_dealer (dealer_ops.py) now matches/upserts using the canonical
+    # form (discovery.base.canonical_website) — a row stored as e.g.
+    # "http://www.example.com/" would otherwise never match a fresh
+    # candidate's "https://example.com" and get re-inserted as a duplicate.
+    # Idempotent (canonicalizing an already-canonical value is a no-op);
+    # deferred import to avoid a load-order cycle with discovery/ (which
+    # imports database.get_conn at its own module level).
+    from discovery.base import canonical_website
+    for row in c.execute(
+        "SELECT id, website FROM dealerships WHERE website IS NOT NULL AND website != ''"
+    ).fetchall():
+        canon = canonical_website(row["website"])
+        if canon and canon != row["website"]:
+            try:
+                c.execute("UPDATE dealerships SET website=? WHERE id=?", (canon, row["id"]))
+            except Exception:
+                # Another row already holds the canonical form (two
+                # near-duplicate rows for the same real site) — skip rather
+                # than fail the whole migration on a UNIQUE collision; that
+                # pair is exactly what dealer_ops' dedupe passes handle.
+                pass
+
     conn.commit()
     conn.close()
     print("✓ Database initialized at", DB_PATH)

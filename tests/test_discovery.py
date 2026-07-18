@@ -31,8 +31,10 @@ from discovery.merge import merge_candidates
 from discovery.osm import candidates_from_payload, nearest_zip
 from discovery.registry import (_tx_rows_from_sheet, _parse_fl_table,
                                  states_in_radius, RegistryProvider)
-from discovery.websites import resolve_website, should_attempt, _is_blocked, _ddg_search
+from discovery.websites import resolve_website, should_attempt, usable_website, _is_blocked, _ddg_search
 from discovery.places import PlacesBudget, search_website
+from dealer_ops import _ensure_dealer
+import discovery as discovery_pkg
 
 FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "discovery")
 
@@ -558,6 +560,185 @@ def test_search_website_empty_results_returns_none():
     result = search_website("key", "Test Motors", "Austin", "TX", 30.5, -97.6,
                              PlacesBudget(5), _post=lambda *a, **k: _FakePlacesResp({"places": []}))
     assert result is None
+
+
+# ── dealer_ops._ensure_dealer: match order, idempotence, collision fold ──
+def test_ensure_dealer_null_website_idempotent():
+    # regression: SQLite `website=?` never matches NULL, so a site-less
+    # discovery candidate used to re-INSERT every run.
+    c = {"name": "Idempotence Motors", "city": "Austin", "zip": "78701",
+         "discovery_source": "osm", "discovery_source_id": "node/idempotence-1"}
+    id1, new1 = _ensure_dealer(dict(c))
+    id2, new2 = _ensure_dealer(dict(c))
+    assert id1 == id2
+    assert new1 is True and new2 is False
+
+
+def test_ensure_dealer_name_zip_idempotent_no_source_id():
+    c = {"name": "Name Zip Motors", "city": "Round Rock", "zip": "78664"}
+    id1, new1 = _ensure_dealer(dict(c))
+    id2, new2 = _ensure_dealer(dict(c))
+    assert id1 == id2
+    assert new1 is True and new2 is False
+
+
+def test_ensure_dealer_directory_id_never_clobbered_by_discovery_call():
+    directory_row = {"id": 4242, "name": "Protected Directory Dealer",
+                      "website": "https://protecteddealer.example"}
+    did, _ = _ensure_dealer(directory_row, distance_mi=10)
+    discovery_row = {"name": "Protected Directory Dealer",
+                      "website": "https://protecteddealer.example",
+                      "discovery_source": "osm", "discovery_source_id": "node/protected-1"}
+    did2, is_new2 = _ensure_dealer(discovery_row)
+    conn = database.get_conn()
+    row = conn.execute("SELECT directory_id, discovery_source FROM dealerships WHERE id=?", (did,)).fetchone()
+    conn.close()
+    assert did == did2 and is_new2 is False
+    assert row["directory_id"] == 4242
+    assert row["discovery_source"] == "osm"
+
+
+def test_ensure_dealer_late_website_collision_folds_and_is_idempotent():
+    # The scenario the plan calls "late website resolution collision": a
+    # site-less dealer tracked by discovery_source_id resolves a website
+    # THIS run that already belongs to a different existing row.
+    target = {"name": "Collision Target", "website": "https://collisiontarget.example", "zip": "99901"}
+    target_id, _ = _ensure_dealer(target)
+    placeholder = {"name": "Collision Source", "zip": "99902",
+                   "discovery_source": "osm", "discovery_source_id": "node/collision-1"}
+    source_id, _ = _ensure_dealer(placeholder)
+    resolved = {"name": "Collision Source", "zip": "99902", "phone": "555-9999",
+                "discovery_source": "osm", "discovery_source_id": "node/collision-1",
+                "website": "https://collisiontarget.example"}
+    fold_id, fold_is_new = _ensure_dealer(resolved)
+    conn = database.get_conn()
+    source_row = conn.execute("SELECT canonical_dealer_id FROM dealerships WHERE id=?", (source_id,)).fetchone()
+    target_row = conn.execute("SELECT phone FROM dealerships WHERE id=?", (target_id,)).fetchone()
+    conn.close()
+    assert fold_id == target_id and fold_is_new is False
+    assert source_row["canonical_dealer_id"] == target_id
+    assert target_row["phone"] == "555-9999"
+    # idempotent: running the same resolved candidate again doesn't move anything
+    fold_id2, _ = _ensure_dealer(resolved)
+    assert fold_id2 == target_id
+
+
+def test_usable_website_garbage_and_blocked_are_not_usable():
+    assert usable_website("https://real-dealer.example/some/page") == "https://real-dealer.example"
+    assert usable_website("yes") is None            # real OSM tag garbage
+    assert usable_website(None) is None
+    assert usable_website("https://facebook.com/somedealer") is None  # blocklisted
+
+
+def test_ensure_dealer_collision_fold_stamps_website_checked_at():
+    # The folded (source_id-tracked) row must get website_checked_at, or
+    # the 30-day guard never engages for it and every future run re-spends
+    # a Places/DDG attempt re-discovering the same collision.
+    target = {"name": "Fold Stamp Target", "website": "https://foldstamptarget.example", "zip": "99903"}
+    target_id, _ = _ensure_dealer(target)
+    placeholder = {"name": "Fold Stamp Source", "zip": "99904",
+                   "discovery_source": "osm", "discovery_source_id": "node/foldstamp-1"}
+    src_id, _ = _ensure_dealer(placeholder)
+    _ensure_dealer({"name": "Fold Stamp Source", "zip": "99904",
+                    "discovery_source": "osm", "discovery_source_id": "node/foldstamp-1",
+                    "website": "https://foldstamptarget.example",
+                    "website_checked_at": "2026-07-18T12:00:00"})
+    conn = database.get_conn()
+    row = conn.execute("SELECT website_checked_at, canonical_dealer_id FROM dealerships WHERE id=?",
+                       (src_id,)).fetchone()
+    conn.close()
+    assert row["canonical_dealer_id"] == target_id
+    assert row["website_checked_at"] == "2026-07-18T12:00:00"
+
+
+# ── discovery.run_discovery: offline orchestration with a stubbed provider ──
+class _StubProvider:
+    name = "stub"
+
+    def __init__(self, candidates=None, raises=False):
+        self._candidates = candidates or []
+        self._raises = raises
+
+    def find(self, lat, lng, radius_mi):
+        if self._raises:
+            raise RuntimeError("stub source failure")
+        return self._candidates
+
+
+def test_run_discovery_idempotent_and_stamps_no_website():
+    original_providers = discovery_pkg._PROVIDERS
+    try:
+        discovery_pkg._PROVIDERS = (_StubProvider([
+            Candidate(name="Orchestrator Toyota", website="https://orchestratortoyota.example",
+                      city="Round Rock", state="TX", zip="78664", lat=30.509, lng=-97.679,
+                      source="osm", source_id="node/orch-1"),
+            Candidate(name="Orchestrator No Site", city="Round Rock", state="TX", zip="78664",
+                      lat=30.507, lng=-97.677, source="osm", source_id="node/orch-2"),
+        ]),)
+        r1 = discovery_pkg.run_discovery("78664", 15)
+        r2 = discovery_pkg.run_discovery("78664", 15)
+    finally:
+        discovery_pkg._PROVIDERS = original_providers
+
+    assert r1["added"] == 2
+    assert r2["added"] == 0  # plan's exact idempotence acceptance test
+    assert r2["errors"] == []
+
+    conn = database.get_conn()
+    row = conn.execute(
+        "SELECT website, scrape_status, distance_mi, location_tag FROM dealerships "
+        "WHERE discovery_source_id=?", ("node/orch-2",)).fetchone()
+    conn.close()
+    assert row["website"] is None
+    assert row["scrape_status"] == "no_website"
+    assert row["location_tag"] == "78664:15"
+    assert row["distance_mi"] is not None
+
+
+def test_run_discovery_garbage_website_tag_respects_reattempt_guard():
+    # A candidate whose OSM website tag is garbage ("yes") falls through to
+    # Places/DDG inside resolve_website, so the 30-day guard must gate it
+    # like a site-less candidate. Before the fix, `if c.website or ...`
+    # treated any truthy tag as free and re-attempted resolution every run —
+    # observable here as website_checked_at being re-stamped on run 2.
+    cand = Candidate(name="Garbage Tag Motors", website="yes", city="Round Rock",
+                     state="TX", zip="78664", lat=30.51, lng=-97.68,
+                     source="osm", source_id="node/garbage-tag-1")
+    original_providers = discovery_pkg._PROVIDERS
+    try:
+        discovery_pkg._PROVIDERS = (_StubProvider([cand]),)
+        discovery_pkg.run_discovery("78664", 15)
+        conn = database.get_conn()
+        first = conn.execute("SELECT website_checked_at FROM dealerships WHERE discovery_source_id=?",
+                             ("node/garbage-tag-1",)).fetchone()["website_checked_at"]
+        conn.close()
+        discovery_pkg.run_discovery("78664", 15)
+        conn = database.get_conn()
+        second = conn.execute("SELECT website_checked_at FROM dealerships WHERE discovery_source_id=?",
+                              ("node/garbage-tag-1",)).fetchone()["website_checked_at"]
+        conn.close()
+    finally:
+        discovery_pkg._PROVIDERS = original_providers
+    assert first is not None            # run 1 did attempt (never checked before)
+    assert second == first              # run 2 was gated — no re-attempt, no re-stamp
+
+
+def test_run_discovery_all_sources_fail_soft_no_crash():
+    original_providers = discovery_pkg._PROVIDERS
+    try:
+        discovery_pkg._PROVIDERS = (_StubProvider(raises=True),)
+        result = discovery_pkg.run_discovery("78664", 15)
+    finally:
+        discovery_pkg._PROVIDERS = original_providers
+    assert result["added"] == 0
+    assert result["in_range"] == 0
+    assert len(result["errors"]) == 1
+
+
+def test_run_discovery_unknown_zip_returns_soft_error_no_crash():
+    result = discovery_pkg.run_discovery("00000", 15)
+    assert result["added"] == 0
+    assert result["errors"]
 
 
 if __name__ == "__main__":

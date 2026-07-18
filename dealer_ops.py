@@ -234,32 +234,158 @@ def dealers_in_radius(zip_code, radius_mi):
     return out
 
 
-def _ensure_dealer(d, distance_mi=None):
-    """Insert/update a dealerships row from a directory dealer. Returns id."""
+def _ensure_dealer(d, distance_mi=None, location_tag=None):
+    """Insert/update a dealerships row from a directory OR discovery
+    candidate dict. Returns (id, is_new).
+
+    Match order (a step is skipped when its key data is missing):
+      1. canonical website — SQLite's `website=?` never matches a NULL
+         parameter, so a site-less discovery candidate used to re-INSERT
+         every run; this now skips the website match entirely instead of
+         relying on a match that can never succeed.
+      2. (discovery_source, discovery_source_id).
+      3. (normalized name, zip5) — exact match on both, post-normalization
+         (fuzzy matching across candidates already happened upstream in
+         discovery/merge.py; this is only about recognizing the SAME
+         candidate across separate discovery runs).
+
+    Directory-engine callers (dealers_in_radius rows) always have a
+    website, so they always resolve via step 1 — behavior for that engine
+    is unchanged except websites are now canonicalized before matching.
+
+    Steps 1 and 2 are checked INDEPENDENTLY (not short-circuited against
+    each other) specifically so a late website-resolution collision is
+    detectable at all: a site-less dealer tracked by discovery_source_id
+    across runs can resolve a website THIS run that already belongs to a
+    different existing row (found earlier via OSM/registry/directory).
+    Checking website first and stopping there — the obvious-looking
+    approach — silently merges into the website's owner without ever
+    looking at the source_id-tracked row, leaving it an orphaned duplicate
+    that never gets flagged. Confirmed by hand before shipping this.
+    """
+    from discovery.base import canonical_website, normalize_name, zip5
+
+    website = canonical_website(d.get("website"))
     conn = get_conn()
     cur = conn.cursor()
-    existing = cur.execute("SELECT id FROM dealerships WHERE website=?", (d.get("website"),)).fetchone()
     now = datetime.utcnow().isoformat()
+
+    website_match = None
+    if website:
+        website_match = cur.execute("SELECT * FROM dealerships WHERE website=?", (website,)).fetchone()
+    source_match = None
+    if d.get("discovery_source") and d.get("discovery_source_id"):
+        source_match = cur.execute(
+            "SELECT * FROM dealerships WHERE discovery_source=? AND discovery_source_id=?",
+            (d["discovery_source"], d["discovery_source_id"])).fetchone()
+
+    if website_match and source_match and website_match["id"] != source_match["id"]:
+        # Late website-resolution collision: the source_id-tracked row
+        # (source_match) just resolved a website this run that already
+        # belongs to a DIFFERENT row (website_match). Fold source_match
+        # into website_match — the row that owns the canonical website is
+        # the more authoritative identity — via canonical_dealer_id instead
+        # of UPDATE-ing into a UNIQUE collision, which would kill the whole
+        # discover job via app.py's job error handler.
+        # website_checked_at must be stamped on the source_id-tracked row —
+        # it's what _lookup_website_checked_at reads for this candidate next
+        # run. Without it, the 30-day guard never engages for a folded
+        # dealer and every future run re-spends a Places/DDG attempt just
+        # to re-discover the same collision.
+        cur.execute(
+            "UPDATE dealerships SET canonical_dealer_id=?, "
+            "website_checked_at=COALESCE(?,website_checked_at), last_seen=? WHERE id=?",
+            (website_match["id"], d.get("website_checked_at"), now, source_match["id"]))
+        cur.execute(
+            "UPDATE dealerships SET address=COALESCE(?,address), city=COALESCE(?,city), "
+            "state=COALESCE(?,state), zip=COALESCE(?,zip), phone=COALESCE(?,phone), "
+            "lat=COALESCE(?,lat), lng=COALESCE(?,lng), "
+            "discovery_source=COALESCE(discovery_source,?), "
+            "discovery_source_id=COALESCE(discovery_source_id,?), last_seen=? WHERE id=?",
+            (d.get("address"), d.get("city"), d.get("state"), d.get("zip"), d.get("phone"),
+             d.get("lat"), d.get("lng"), d.get("discovery_source"), d.get("discovery_source_id"),
+             now, website_match["id"]))
+        conn.commit()
+        conn.close()
+        return website_match["id"], False
+
+    existing = website_match or source_match
+    if existing is None and d.get("name") and d.get("zip"):
+        z5, nm = zip5(d.get("zip")), normalize_name(d.get("name"))
+        if z5 and nm:
+            for row in cur.execute("SELECT * FROM dealerships WHERE zip LIKE ?", (z5 + "%",)).fetchall():
+                if normalize_name(row["name"]) == nm:
+                    existing = row
+                    break
+
     if existing:
-        cur.execute("UPDATE dealerships SET directory_id=?, distance_mi=COALESCE(?,distance_mi), "
-                    "lat=COALESCE(?,lat), lng=COALESCE(?,lng), last_seen=? WHERE id=?",
-                    (d.get("id"), distance_mi, d.get("lat"), d.get("lng"), now, existing["id"]))
-        did = existing["id"]
+        set_clauses = [
+            "distance_mi=COALESCE(?,distance_mi)", "lat=COALESCE(?,lat)", "lng=COALESCE(?,lng)",
+            "address=COALESCE(?,address)", "city=COALESCE(?,city)", "state=COALESCE(?,state)",
+            "zip=COALESCE(?,zip)", "phone=COALESCE(?,phone)",
+            "discovery_source=COALESCE(?,discovery_source)",
+            "discovery_source_id=COALESCE(?,discovery_source_id)",
+            "website=COALESCE(?,website)",
+            "website_source=COALESCE(?,website_source)",
+            "website_checked_at=COALESCE(?,website_checked_at)",
+            "location_tag=COALESCE(?,location_tag)",
+            "last_seen=?",
+        ]
+        params = [distance_mi, d.get("lat"), d.get("lng"), d.get("address"), d.get("city"),
+                  d.get("state"), d.get("zip"), d.get("phone"),
+                  d.get("discovery_source"), d.get("discovery_source_id"),
+                  website, d.get("website_source"), d.get("website_checked_at"),
+                  location_tag, now]
+        # directory_id: only the directory engine supplies d["id"] (a
+        # tx_directory row id); never clobber an existing value with NULL
+        # when a discovery-engine call (no "id" key) matches this row.
+        if d.get("id") is not None:
+            set_clauses.append("directory_id=?")
+            params.append(d["id"])
+        params.append(existing["id"])
+        cur.execute(f"UPDATE dealerships SET {', '.join(set_clauses)} WHERE id=?", params)
+        did, is_new = existing["id"], False
     else:
         cur.execute("""INSERT INTO dealerships
-            (name,address,city,state,zip,phone,website,lat,lng,distance_mi,directory_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (name,address,city,state,zip,phone,website,lat,lng,distance_mi,directory_id,
+             discovery_source,discovery_source_id,website_source,website_checked_at,location_tag)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (d.get("name"), d.get("address"), d.get("city"), d.get("state"), d.get("zip"),
-             d.get("phone"), d.get("website"), d.get("lat"), d.get("lng"), distance_mi, d.get("id")))
-        did = cur.lastrowid
+             d.get("phone"), website, d.get("lat"), d.get("lng"), distance_mi, d.get("id"),
+             d.get("discovery_source"), d.get("discovery_source_id"),
+             d.get("website_source"), d.get("website_checked_at"), location_tag))
+        did, is_new = cur.lastrowid, True
+
     conn.commit()
     conn.close()
-    return did, (existing is None)
+    return did, is_new
 
 
-# ── Discover: add in-radius directory dealers to the working set ──
+# ── Discover: add in-radius dealers to the working set ────────
 
-def discover_dealers(zip_code, radius_mi, progress_cb=None, run_id=None):
+def discover_dealers(zip_code, radius_mi, progress_cb=None, run_id=None, engine="auto"):
+    """Wrapper over the two discovery engines (plan step 6):
+      engine='auto'      — autonomous discovery (discovery.run_discovery):
+                            OSM + state registries, no hardcoded dealer
+                            list. The default, and the whole point of the
+                            discovery round.
+                      engine='directory'  — the original TX-directory-only engine,
+                            kept reachable for parity testing against the
+                            autonomous engine (docs/PLAN-discovery.md's
+                            parity harness, plan step 7) until it's proven
+                            out and the directory dependency can be dropped.
+    Signature is backwards compatible: existing callers that never pass
+    `engine` get the new autonomous default automatically."""
+    if engine == "directory":
+        return _discover_dealers_directory(zip_code, radius_mi, progress_cb, run_id)
+    from discovery import run_discovery
+    return run_discovery(zip_code, radius_mi, progress_cb=progress_cb, run_id=run_id)
+
+
+def _discover_dealers_directory(zip_code, radius_mi, progress_cb=None, run_id=None):
+    """The original engine: add in-radius TX-directory dealers to the
+    working set. No scraping, no OSM/registry/website-resolution — just the
+    tx_directory list, filtered to radius. Kept for parity testing."""
     init_db()
     run_id = run_id or uuid.uuid4().hex[:8]
     def cb(msg, pct):

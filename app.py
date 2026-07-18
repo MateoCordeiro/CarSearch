@@ -187,7 +187,11 @@ def _run_job(name, fn):
 def api_discover():
     import importlib, dealer_ops; importlib.reload(cfg)
     zip_code = cfg.LOCATION["zip"]; radius = cfg.LOCATION["radius"]
-    ok = _run_job("discover", lambda cb: dealer_ops.discover_dealers(zip_code, radius, progress_cb=cb))
+    # engine defaults to 'auto' (autonomous OSM+registry discovery) inside
+    # dealer_ops.discover_dealers; 'directory' stays reachable for parity
+    # testing against the TX-directory-only engine (plan step 7).
+    engine = (request.json or {}).get("engine", "auto")
+    ok = _run_job("discover", lambda cb: dealer_ops.discover_dealers(zip_code, radius, progress_cb=cb, engine=engine))
     return (jsonify({"ok": True}) if ok else (jsonify({"error": "already running"}), 409))
 
 
@@ -234,8 +238,24 @@ def api_directory_stats():
     total    = conn.execute("SELECT COUNT(*) FROM tx_directory").fetchone()[0]
     with_web = conn.execute("SELECT COUNT(*) FROM tx_directory WHERE website IS NOT NULL AND website!=''").fetchone()[0]
     cities   = conn.execute("SELECT COUNT(DISTINCT city) FROM tx_directory").fetchone()[0]
+    # Dealership-level aggregates (plan step 6): the working set built by
+    # BOTH engines, not just the TX-directory snapshot above. no_website
+    # counts autonomous-discovery dealers still waiting on a resolved site.
+    dealerships_total = conn.execute("SELECT COUNT(*) FROM dealerships").fetchone()[0]
+    dealerships_with_site = conn.execute(
+        "SELECT COUNT(*) FROM dealerships WHERE website IS NOT NULL AND website!=''").fetchone()[0]
+    dealerships_no_website = dealerships_total - dealerships_with_site
+    per_source = dict(conn.execute(
+        "SELECT COALESCE(discovery_source,'directory'), COUNT(*) FROM dealerships GROUP BY 1"
+    ).fetchall())
     conn.close()
-    return jsonify({"total": total, "with_website": with_web, "cities": cities})
+    return jsonify({
+        "total": total, "with_website": with_web, "cities": cities,
+        "dealerships_total": dealerships_total,
+        "dealerships_with_site": dealerships_with_site,
+        "dealerships_no_website": dealerships_no_website,
+        "dealerships_per_source": per_source,
+    })
 
 
 @app.route("/api/dealers/lists")
@@ -248,7 +268,11 @@ def api_dealer_lists():
     ).fetchall()]
     conn.close()
     can    = [r for r in rows if r["scrape_status"] == "ok"]
-    cannot = [r for r in rows if r["scrape_status"] in ("blocked", "unsupported", "unreachable", "empty", "error")]
+    # 'no_website' (set by discovery when it can't resolve a site) belongs
+    # here so autonomous-discovery dealers are visible instead of silently
+    # missing from both lists — plan step 6 calls this out by name.
+    cannot = [r for r in rows if r["scrape_status"] in
+              ("blocked", "unsupported", "unreachable", "empty", "error", "no_website")]
     return jsonify({"can_scrape": can, "cannot_scrape": cannot})
 
 
@@ -291,6 +315,7 @@ if __name__ == "__main__":
     init_db()
 
     if cfg.AUTO_REFRESH_HOURS > 0:
+        from datetime import datetime, timedelta
         from apscheduler.schedulers.background import BackgroundScheduler
         scheduler = BackgroundScheduler()
 
@@ -310,10 +335,24 @@ if __name__ == "__main__":
             # 'ok' and get picked up by the next scan, with no manual re-run.
             if not _run_job("classify", _classify_job("radius")):
                 print("[skip] Scheduled re-classify skipped — classify already running")
-        scheduler.add_job(_scheduled_reclassify, "interval", hours=24)
+        # Offset the first run by +1h so scan (every AUTO_REFRESH_HOURS,
+        # default 24) and reclassify (every 24h) don't both land on the same
+        # tick daily and fight over separate _run_job locks for no reason —
+        # plan step 6 calls this out explicitly.
+        scheduler.add_job(_scheduled_reclassify, "interval", hours=24,
+                           next_run_time=datetime.now() + timedelta(hours=1))
+
+        # NOTE: no scheduled/periodic discovery job yet, deliberately — the
+        # user asked to hold off on any automatic discovery run until more
+        # of the discovery integration/sources have been verified working.
+        # discover_dealers (engine='auto') is still fully usable manually:
+        # the dashboard's "Find dealers in radius" button (/api/dealers/
+        # discover) and `python -m discovery <zip> <radius>` both work today.
+        # Add a weekly scheduler.add_job(...) here once that's greenlit.
 
         scheduler.start()
-        print(f"[OK] Auto-refresh every {cfg.AUTO_REFRESH_HOURS}h; re-classify every 24h")
+        print(f"[OK] Auto-refresh every {cfg.AUTO_REFRESH_HOURS}h; "
+              f"re-classify every 24h (offset +1h)")
 
     print("✓ BumperScraper running at http://localhost:5000")
     app.run(debug=False, use_reloader=False)
